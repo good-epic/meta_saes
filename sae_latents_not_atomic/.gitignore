@@ -1,0 +1,6 @@
+artifacts/
+checkpoints/
+wandb/
+__pycache__/
+*.egg-info
+data/

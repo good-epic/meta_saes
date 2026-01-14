@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meta_saes"
+version = "0.1"
+description = "Tools for training meta SAEs"
+authors = [
+    {name = "Bart Bussmann", email = "bartbussmann@gmail.com"},
+]
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "transformer-lens==2.3.0",
+    "sae-lens==3.14.0",
+    "tqdm",
+    "torch==2.4.0", 
+]
+
+[project.urls]
+Homepage = "https://github.com/bartbussmann/meta_saes"
+
+[tool.setuptools]
+packages = ["meta_saes"]
