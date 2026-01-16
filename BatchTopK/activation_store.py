@@ -50,31 +50,37 @@ class ActivationsStore:
 
     def get_batch_tokens(self):
         all_tokens = []
-        while len(all_tokens) < self.model_batch_size * self.context_size:
+        target_len = self.model_batch_size * self.context_size
+        while len(all_tokens) < target_len:
             try:
                 batch = next(self.dataset)
             except StopIteration:
                 # Dataset exhausted, restart it
-                print("   📚 Dataset exhausted, restarting...")
+                print("   Dataset exhausted, restarting...")
                 dataset_path = self.cfg["dataset_path"]
                 dataset_name = self.cfg.get("dataset_name", None)
                 if dataset_path in ["wikitext-2-raw-v1", "wikitext-2-v1", "wikitext-103-raw-v1", "wikitext-103-v1"]:
-                    # These are wikitext configs, load with config name
                     self.dataset = iter(load_dataset("wikitext", dataset_path, split="train", streaming=True))
                 elif dataset_name is not None:
-                    # Dataset with a named subset (e.g., FineWeb sample-10BT)
                     self.dataset = iter(load_dataset(dataset_path, name=dataset_name, split="train", streaming=True))
                 else:
-                    # Regular dataset without config
                     self.dataset = iter(load_dataset(dataset_path, split="train", streaming=True))
                 batch = next(self.dataset)
-                
+
             if self.tokens_column == "text":
+                # Tokenize text - this returns a GPU tensor
                 tokens = self.model.to_tokens(batch["text"], truncate=True, move_to_device=True, prepend_bos=True).squeeze(0)
+                all_tokens.extend(tokens.tolist())  # Convert to list for extending
             else:
+                # Pre-tokenized data
                 tokens = batch[self.tokens_column]
-            all_tokens.extend(tokens)
-        token_tensor = torch.tensor(all_tokens, dtype=torch.long, device=self.device)[:self.model_batch_size * self.context_size]
+                if isinstance(tokens, torch.Tensor):
+                    all_tokens.extend(tokens.tolist())
+                else:
+                    all_tokens.extend(tokens)
+
+        # Create tensor directly on GPU
+        token_tensor = torch.tensor(all_tokens[:target_len], dtype=torch.long, device=self.device)
         return token_tensor.view(self.model_batch_size, self.context_size)
 
     def get_activations(self, batch_tokens: torch.Tensor):

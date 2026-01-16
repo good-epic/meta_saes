@@ -310,6 +310,12 @@ def train_sae_with_meta(
             ``lambda2``, ``sigma_sq``, ``n_primary_steps``,
             and ``n_meta_steps``.
     """
+    # Verify GPU placement
+    device = primary_cfg.get("device", "cuda:0")
+    print(f"   Device configuration: {device}")
+    print(f"   Primary SAE W_enc device: {primary_sae.W_enc.device}")
+    print(f"   Meta SAE W_enc device: {meta_sae.meta_sae.W_enc.device}")
+
     # Attach the meta SAE to the primary for penalty computation.
     primary_sae.meta_sae = meta_sae
     lambda2 = penalty_cfg.get("lambda2", 0.0)
@@ -337,12 +343,22 @@ def train_sae_with_meta(
     pbar = tqdm.tqdm(total=total_batches, desc="Training SAE + Meta SAE")
     
     # Alternate training
+    # Log frequency - reduce .item() calls which cause CPU-GPU sync
+    log_freq = 50
+
+    first_batch_logged = False
     while batch_iter < total_batches:
         # Primary SAE phase
         for _ in range(n_primary_steps):
             if batch_iter >= total_batches:
                 break
             batch = activation_store.next_batch()
+
+            # Verify first batch is on GPU
+            if not first_batch_logged:
+                print(f"   First batch device: {batch.device}")
+                first_batch_logged = True
+
             output = primary_sae(batch)
             loss = output["loss"]
             loss.backward()
@@ -350,36 +366,27 @@ def train_sae_with_meta(
             primary_sae.make_decoder_weights_and_grad_unit_norm()
             primary_optimizer.step()
             primary_optimizer.zero_grad()
-            
-            # Explicitly clear gradients from all model parameters
-            for param in primary_sae.parameters():
-                param.grad = None
-            
-            # Capture values for progress bar before cleanup
-            loss_val = loss.item()
-            l0_val = output.get('l0_norm', 0)
-            l2_val = output.get('l2_loss', 0) 
-            decomp_val = output.get('decomp_penalty', 0)
-            
+
+            batch_iter += 1
+            pbar.update(1)
+
+            # Only log every log_freq steps to reduce CPU-GPU sync from .item() calls
+            if batch_iter % log_freq == 0:
+                pbar.set_postfix({
+                    "Loss": f"{loss.item():.4f}",
+                    "L0": f"{output['l0_norm'].item():.1f}",
+                    "L2": f"{output['l2_loss'].item():.4f}",
+                    "Decomp": f"{output.get('decomp_penalty', torch.tensor(0.0)).item():.4f}"
+                })
+
             # Explicit cleanup to prevent memory leaks
             del batch, output, loss
-            
-            batch_iter += 1
-            
-            # Update progress bar with current losses
-            pbar.update(1)
-            pbar.set_postfix({
-                "Primary Loss": f"{loss_val:.4f}",
-                "L0": f"{l0_val:.1f}",
-                "L2": f"{l2_val:.4f}",
-                "Decomp": f"{decomp_val:.4f}"
-            })
-            
-            # Clear GPU cache periodically during primary training
-            if batch_iter % 100 == 0:
+
+            # Clear GPU cache less frequently (every 1000 steps instead of 100)
+            if batch_iter % 1000 == 0:
                 torch.cuda.empty_cache()
-        # Meta SAE phase
-        for meta_step in tqdm.trange(n_meta_steps, desc="Meta SAE steps", leave=False):
+        # Meta SAE phase - run without nested progress bar for speed
+        for meta_step in range(n_meta_steps):
             # Use the current primary decoder columns as training data for meta SAE
             W_dec = primary_sae.W_dec.detach()
             meta_output = meta_sae(W_dec)
@@ -390,17 +397,9 @@ def train_sae_with_meta(
                 meta_sae.meta_sae.make_decoder_weights_and_grad_unit_norm()
             meta_optimizer.step()
             meta_optimizer.zero_grad()
-            
-            # Explicitly clear gradients from meta SAE parameters
-            for param in meta_sae.parameters():
-                param.grad = None
-            
+
             # Cleanup meta SAE training variables
             del W_dec, meta_output, meta_loss
-            
-            # Clear cache after meta training phase
-            if meta_step == n_meta_steps - 1:  # Last meta step
-                torch.cuda.empty_cache()
         
     # Close progress bar
     pbar.close()
@@ -421,6 +420,8 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg):
     print(f"   Target tokens: {cfg['num_tokens']:,}")
     print(f"   Batch size: {cfg['batch_size']}")
     print(f"   Top-k: {cfg['top_k']}")
+    print(f"   Device: {cfg.get('device', 'cuda:0')}")
+    print(f"   SAE W_enc device: {primary_sae.W_enc.device}")
     
     # Setup optimizer
     optimizer = optim.Adam(primary_sae.parameters(), lr=cfg["lr"], betas=(cfg["beta1"], cfg["beta2"]))
@@ -430,9 +431,12 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg):
     
     # Training loop with progress bar
     pbar = tqdm.tqdm(total=num_batches, desc="Solo Primary SAE Training", leave=True)
-    
+
     primary_sae.train()
-    
+
+    # Log frequency - reduce .item() calls which cause CPU-GPU sync
+    log_freq = 50
+
     for step in range(num_batches):
         # Get batch
         try:
@@ -440,41 +444,43 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg):
         except StopIteration:
             print(f"   Dataset exhausted at step {step}, stopping training.")
             break
-            
+
+        # Verify first batch is on GPU
+        if step == 0:
+            print(f"   First batch device: {batch.device}")
+
         # Forward pass
         optimizer.zero_grad()
-        for param in primary_sae.parameters():
-            param.grad = None
-            
         output = primary_sae(batch)
         loss = output["loss"]
-        
+
         # Backward pass
         loss.backward()
-        
+
         # Gradient clipping and decoder weight normalization
         if hasattr(primary_sae, 'make_decoder_weights_and_grad_unit_norm'):
             primary_sae.make_decoder_weights_and_grad_unit_norm()
-        
+
         optimizer.step()
-        
-        # Update progress bar
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'l2': f'{output["l2_loss"].item():.4f}',
-            'l1': f'{output["l1_loss"].item():.4f}',
-            'l0': f'{output["l0_norm"].item():.1f}',
-            'dead': f'{output["num_dead_features"].item()}'
-        })
         pbar.update(1)
-        
+
+        # Only log every log_freq steps to reduce CPU-GPU sync from .item() calls
+        if (step + 1) % log_freq == 0:
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'l2': f'{output["l2_loss"].item():.4f}',
+                'l1': f'{output["l1_loss"].item():.4f}',
+                'l0': f'{output["l0_norm"].item():.1f}',
+                'dead': f'{output["num_dead_features"].item()}'
+            })
+
         # Memory cleanup
         del batch, output, loss
-        
-        # Maybe this mimics switching between training and meta training phases and clears memory?
-        if (step + 1) % 50 == 0:
+
+        # Clear GPU cache less frequently
+        if (step + 1) % 1000 == 0:
             torch.cuda.empty_cache()
-    
+
     pbar.close()
     print("✅ Solo primary SAE training completed!")
 
@@ -513,46 +519,46 @@ def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cf
     
     # Training loop
     pbar = tqdm.tqdm(total=total_meta_steps, desc="Meta SAE Training", leave=True)
-    
+
     meta_sae.train()
-    
+
+    # Log frequency - reduce .item() calls which cause CPU-GPU sync
+    log_freq = 50
+
     for step in range(total_meta_steps):
         # Get decoder weights (constant input)
         W_dec = primary_sae.W_dec.detach()  # Shape: [dict_size, act_size]
-        
+
         # Forward pass through meta SAE
         meta_optimizer.zero_grad()
-        for param in meta_sae.parameters():
-            param.grad = None
-            
         meta_output = meta_sae(W_dec)
         meta_loss = meta_output["loss"]
-        
+
         # Backward pass
         meta_loss.backward()
-        
+
         # Gradient clipping and decoder weight normalization for meta SAE
         if hasattr(meta_sae.meta_sae, 'make_decoder_weights_and_grad_unit_norm'):
             meta_sae.meta_sae.make_decoder_weights_and_grad_unit_norm()
-        
+
         meta_optimizer.step()
-        
-        # Update progress bar
-        pbar.set_postfix({
-            'meta_loss': f'{meta_loss.item():.4f}',
-            'meta_l2': f'{meta_output["l2_loss"].item():.4f}',
-            'meta_l1': f'{meta_output["l1_loss"].item():.4f}',
-            'meta_l0': f'{meta_output["l0_norm"].item():.1f}',
-            'meta_dead': f'{meta_output["num_dead_features"].item()}'
-        })
         pbar.update(1)
-        
+
+        # Only log every log_freq steps to reduce CPU-GPU sync from .item() calls
+        if (step + 1) % log_freq == 0:
+            pbar.set_postfix({
+                'loss': f'{meta_loss.item():.4f}',
+                'l2': f'{meta_output["l2_loss"].item():.4f}',
+                'l0': f'{meta_output["l0_norm"].item():.1f}',
+            })
+
         # Memory cleanup
         del W_dec, meta_output, meta_loss
-        
-        if step % 100 == 0:
+
+        # Clear GPU cache less frequently
+        if (step + 1) % 1000 == 0:
             torch.cuda.empty_cache()
-    
+
     pbar.close()
     print("✅ Meta SAE training on frozen primary completed!")
     

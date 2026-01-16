@@ -251,19 +251,21 @@ class RectangleFunction(autograd.Function):
 class JumpReLUFunction(autograd.Function):
     @staticmethod
     def forward(ctx, x, log_threshold, bandwidth):
-        ctx.save_for_backward(x, log_threshold, torch.tensor(bandwidth))
+        # Create bandwidth tensor on same device as x to avoid CPU-GPU sync
+        bandwidth_tensor = torch.tensor(bandwidth, device=x.device, dtype=x.dtype)
+        ctx.save_for_backward(x, log_threshold, bandwidth_tensor)
         threshold = torch.exp(log_threshold)
         return x * (x > threshold).float()
 
     @staticmethod
     def backward(ctx, grad_output):
         x, log_threshold, bandwidth_tensor = ctx.saved_tensors
-        bandwidth = bandwidth_tensor.item()
+        # bandwidth_tensor is already on GPU, no .item() needed for scalar ops
         threshold = torch.exp(log_threshold)
         x_grad = (x > threshold).float() * grad_output
         threshold_grad = (
-            -(threshold / bandwidth)
-            * RectangleFunction.apply((x - threshold) / bandwidth)
+            -(threshold / bandwidth_tensor)
+            * RectangleFunction.apply((x - threshold) / bandwidth_tensor)
             * grad_output
         )
         return x_grad, threshold_grad, None  # None for bandwidth
@@ -280,19 +282,21 @@ class JumpReLU(nn.Module):
 class StepFunction(autograd.Function):
     @staticmethod
     def forward(ctx, x, log_threshold, bandwidth):
-        ctx.save_for_backward(x, log_threshold, torch.tensor(bandwidth))
+        # Create bandwidth tensor on same device as x to avoid CPU-GPU sync
+        bandwidth_tensor = torch.tensor(bandwidth, device=x.device, dtype=x.dtype)
+        ctx.save_for_backward(x, log_threshold, bandwidth_tensor)
         threshold = torch.exp(log_threshold)
         return (x > threshold).float()
 
     @staticmethod
     def backward(ctx, grad_output):
         x, log_threshold, bandwidth_tensor = ctx.saved_tensors
-        bandwidth = bandwidth_tensor.item()
+        # bandwidth_tensor is already on GPU, no .item() needed
         threshold = torch.exp(log_threshold)
         x_grad = torch.zeros_like(x)
         threshold_grad = (
-            -(1.0 / bandwidth)
-            * RectangleFunction.apply((x - threshold) / bandwidth)
+            -(1.0 / bandwidth_tensor)
+            * RectangleFunction.apply((x - threshold) / bandwidth_tensor)
             * grad_output
         )
         return x_grad, threshold_grad, None  # None for bandwidth
