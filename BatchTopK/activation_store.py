@@ -13,12 +13,17 @@ class ActivationsStore:
         cfg: dict,
     ):
         self.model = model
-        
+
         # Handle dataset path that might include config name
         dataset_path = cfg["dataset_path"]
+        dataset_name = cfg.get("dataset_name", None)  # Optional subset/config name
+
         if dataset_path in ["wikitext-2-raw-v1", "wikitext-2-v1", "wikitext-103-raw-v1", "wikitext-103-v1"]:
             # These are wikitext configs, load with config name
             self.dataset = iter(load_dataset("wikitext", dataset_path, split="train", streaming=True))
+        elif dataset_name is not None:
+            # Dataset with a named subset (e.g., FineWeb sample-10BT)
+            self.dataset = iter(load_dataset(dataset_path, name=dataset_name, split="train", streaming=True))
         else:
             # Regular dataset without config
             self.dataset = iter(load_dataset(dataset_path, split="train", streaming=True))
@@ -52,9 +57,13 @@ class ActivationsStore:
                 # Dataset exhausted, restart it
                 print("   📚 Dataset exhausted, restarting...")
                 dataset_path = self.cfg["dataset_path"]
+                dataset_name = self.cfg.get("dataset_name", None)
                 if dataset_path in ["wikitext-2-raw-v1", "wikitext-2-v1", "wikitext-103-raw-v1", "wikitext-103-v1"]:
                     # These are wikitext configs, load with config name
                     self.dataset = iter(load_dataset("wikitext", dataset_path, split="train", streaming=True))
+                elif dataset_name is not None:
+                    # Dataset with a named subset (e.g., FineWeb sample-10BT)
+                    self.dataset = iter(load_dataset(dataset_path, name=dataset_name, split="train", streaming=True))
                 else:
                     # Regular dataset without config
                     self.dataset = iter(load_dataset(dataset_path, split="train", streaming=True))

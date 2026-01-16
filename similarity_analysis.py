@@ -45,7 +45,14 @@ class FunctionalSimilarityAssessor:
         top_contexts = [[(-1.0, -1)] * top_k_contexts for _ in range(n_features)]
         min_activations = torch.full((n_features,), -1.0, device=self.device)
 
-        dataset = load_dataset(self.cfg["dataset_path"], streaming=True, split="train")
+        # Get dataset config
+        dataset_path = self.cfg.get("dataset_path", "HuggingFaceFW/fineweb")
+        dataset_name = self.cfg.get("dataset_name", "sample-10BT")
+
+        if dataset_name:
+            dataset = load_dataset(dataset_path, name=dataset_name, streaming=True, split="train")
+        else:
+            dataset = load_dataset(dataset_path, streaming=True, split="train")
         ds_iter = iter(dataset)
 
         pbar = tqdm.tqdm(range(num_batches), desc=f"Finding Top Contexts (Dict Size: {n_features})")
@@ -60,7 +67,10 @@ class FunctionalSimilarityAssessor:
                     example = next(ds_iter)
                     batch_texts.append(example["text"])
                 except StopIteration:
-                    dataset = load_dataset(self.cfg["dataset_path"], streaming=True, split="train")
+                    if dataset_name:
+                        dataset = load_dataset(dataset_path, name=dataset_name, streaming=True, split="train")
+                    else:
+                        dataset = load_dataset(dataset_path, streaming=True, split="train")
                     ds_iter = iter(dataset)
                     example = next(ds_iter)
                     batch_texts.append(example["text"])

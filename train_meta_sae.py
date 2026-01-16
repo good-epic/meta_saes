@@ -55,6 +55,8 @@ import random
 from meta_sae_extension import (
     MetaSAEWrapper,
     BatchTopKSAEWithPenalty,
+    SAEWithPenalty,
+    get_sae_class,
     train_sae_with_meta,
     train_primary_sae_solo,
     train_meta_sae_on_frozen_primary,
@@ -89,6 +91,9 @@ def build_configs(args: argparse.Namespace) -> (Dict[str, Any], Dict[str, Any], 
     cfg.update(vars(args))
     # Explicitly set top_k for primary
     cfg["top_k"] = args.primary_top_k
+    # Set SAE type and bandwidth for primary
+    cfg["sae_type"] = args.primary_sae_type
+    cfg["bandwidth"] = args.bandwidth
     # Ensure buffer for initial phase uses joint setting by default; phases will override as needed
     cfg["num_batches_in_buffer"] = args.num_batches_in_buffer_joint
 
@@ -96,6 +101,8 @@ def build_configs(args: argparse.Namespace) -> (Dict[str, Any], Dict[str, Any], 
     meta_cfg = cfg.copy()
     meta_cfg["dict_size"] = args.meta_dict_size
     meta_cfg["top_k"] = args.meta_top_k
+    meta_cfg["sae_type"] = args.meta_sae_type
+    meta_cfg["bandwidth"] = args.bandwidth
 
     # Penalty configuration from args
     penalty_cfg = {
@@ -155,9 +162,13 @@ if args.train_joint_saes:
     # Create activation store for primary SAE
     activation_store = ActivationsStore(model, cfg)
     print(f"🔍 Joint training model_batch_size: {cfg['model_batch_size']}")
-    # Instantiate meta SAE and primary SAE with penalty
-    meta_sae = MetaSAEWrapper(BatchTopKSAE, meta_cfg)
-    primary_sae = BatchTopKSAEWithPenalty(cfg, meta_sae, penalty_cfg)
+    # Instantiate meta SAE and primary SAE with penalty using configured SAE types
+    primary_sae_cls = get_sae_class(cfg["sae_type"])
+    meta_sae_cls = get_sae_class(meta_cfg["sae_type"])
+    print(f"🔧 Primary SAE type: {cfg['sae_type']} ({primary_sae_cls.__name__})")
+    print(f"🔧 Meta SAE type: {meta_cfg['sae_type']} ({meta_sae_cls.__name__})")
+    meta_sae = MetaSAEWrapper(meta_sae_cls, meta_cfg)
+    primary_sae = SAEWithPenalty(primary_sae_cls, cfg, meta_sae, penalty_cfg)
     print_gpu_memory_usage()
 
     print("\n" + "="*60)
@@ -222,9 +233,10 @@ if args.train_sequential_saes:
     solo_activation_store = ActivationsStore(model, cfg)
     print(f"🔍 Solo training model_batch_size: {cfg['model_batch_size']}")
 
-    # Create solo primary SAE (regular BatchTopKSAE without penalty)
-    print("Creating solo primary SAE...")
-    solo_primary_sae = BatchTopKSAE(cfg)
+    # Create solo primary SAE (regular SAE without penalty, using configured type)
+    solo_primary_sae_cls = get_sae_class(cfg["sae_type"])
+    print(f"Creating solo primary SAE ({cfg['sae_type']})...")
+    solo_primary_sae = solo_primary_sae_cls(cfg)
     if torch.cuda.is_available():
         print(f"�� Memory at start of solo training - Allocated: {torch.cuda.memory_allocated() / 1e9:.1f}GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.1f}GB")
     train_primary_sae_solo(solo_primary_sae, solo_activation_store, cfg)
@@ -265,9 +277,10 @@ if args.train_sequential_saes:
     print("PHASE 3: SEQUENTIAL META SAE TRAINING (On frozen solo primary)")
     print("="*60)
 
-    # Create meta SAE for sequential training 
-    print("Creating meta SAE for sequential training...")
-    sequential_meta_sae = MetaSAEWrapper(BatchTopKSAE, meta_cfg)
+    # Create meta SAE for sequential training (using configured type)
+    sequential_meta_sae_cls = get_sae_class(meta_cfg["sae_type"])
+    print(f"Creating meta SAE for sequential training ({meta_cfg['sae_type']})...")
+    sequential_meta_sae = MetaSAEWrapper(sequential_meta_sae_cls, meta_cfg)
     if torch.cuda.is_available():
         print(f"🔍 Memory at start of sequential training - Allocated: {torch.cuda.memory_allocated() / 1e9:.1f}GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.1f}GB")
     train_meta_sae_on_frozen_primary(sequential_meta_sae, solo_primary_sae, meta_cfg, penalty_cfg)

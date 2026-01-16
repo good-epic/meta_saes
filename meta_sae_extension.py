@@ -61,12 +61,36 @@ import tqdm
 import torch.optim as optim
 
 try:
-    # Import the existing BatchTopKSAE class from the repository.  If this
+    # Import the existing SAE classes from the repository.  If this
     # fails, ensure that the repository is on the Python path.
-    from BatchTopK.sae import BatchTopKSAE
+    from BatchTopK.sae import BatchTopKSAE, TopKSAE, VanillaSAE, JumpReLUSAE
 except ImportError as e:
-    raise ImportError("Could not import BatchTopKSAE from sae.py. "
+    raise ImportError("Could not import SAE classes from sae.py. "
                       "Ensure that the BatchTopK repository is in the Python path.") from e
+
+
+# Registry of SAE classes by name
+SAE_REGISTRY = {
+    "batchtopk": BatchTopKSAE,
+    "topk": TopKSAE,
+    "vanilla": VanillaSAE,
+    "jumprelu": JumpReLUSAE,
+}
+
+
+def get_sae_class(sae_type: str) -> type:
+    """Get the SAE class for a given type name.
+
+    Args:
+        sae_type: One of 'batchtopk', 'topk', 'vanilla', 'jumprelu'
+
+    Returns:
+        The SAE class corresponding to the type.
+    """
+    sae_type = sae_type.lower()
+    if sae_type not in SAE_REGISTRY:
+        raise ValueError(f"Unknown SAE type: {sae_type}. Valid options: {list(SAE_REGISTRY.keys())}")
+    return SAE_REGISTRY[sae_type]
 
 
 class MetaSAEWrapper(nn.Module):
@@ -100,6 +124,79 @@ class MetaSAEWrapper(nn.Module):
     def forward_on_vectors(self, vectors: torch.Tensor) -> Dict[str, Any]:
         """Alias for forward method for backward compatibility."""
         return self.forward(vectors)
+
+
+class SAEWithPenalty(nn.Module):
+    """Generic wrapper that adds decomposability penalty to any SAE.
+
+    This wrapper can be used with any SAE class (BatchTopK, JumpReLU, etc.)
+    by composing rather than inheriting. The penalty encourages the SAE
+    to learn features that cannot be sparsely reconstructed by a separate,
+    smaller meta SAE.
+    """
+
+    def __init__(self, sae_cls: type, cfg: Dict[str, Any], meta_sae: MetaSAEWrapper | None, penalty_cfg: Dict[str, Any]):
+        super().__init__()
+        self.inner_sae = sae_cls(cfg)
+        self.meta_sae = meta_sae
+        self.penalty_lambda = penalty_cfg.get("lambda2", 0.0)
+        self.sigma_sq = penalty_cfg.get("sigma_sq", 1.0)
+        self.cfg = cfg
+
+    @property
+    def W_dec(self):
+        return self.inner_sae.W_dec
+
+    @property
+    def W_enc(self):
+        return self.inner_sae.W_enc
+
+    @property
+    def b_dec(self):
+        return self.inner_sae.b_dec
+
+    @property
+    def b_enc(self):
+        return self.inner_sae.b_enc
+
+    def parameters(self, recurse: bool = True):
+        return self.inner_sae.parameters(recurse=recurse)
+
+    def state_dict(self, *args, **kwargs):
+        return self.inner_sae.state_dict(*args, **kwargs)
+
+    def load_state_dict(self, state_dict, *args, **kwargs):
+        return self.inner_sae.load_state_dict(state_dict, *args, **kwargs)
+
+    def compute_decomposability_penalty(self) -> torch.Tensor:
+        """Compute the penalty based on meta SAE reconstruction error.
+
+        The penalty encourages decoder vectors to be HARD to reconstruct
+        by the meta SAE. When reconstruction error is low, the penalty is high.
+        """
+        if self.meta_sae is None:
+            return torch.tensor(0.0, device=self.W_dec.device, dtype=self.W_dec.dtype)
+
+        W_dec = self.W_dec
+
+        with torch.no_grad():
+            meta_output = self.meta_sae.forward_on_vectors(W_dec.detach())
+            recon = meta_output["sae_out"].detach()
+
+        errors = ((W_dec - recon).pow(2)).sum(dim=1)
+        penalties = torch.exp(-errors / self.sigma_sq)
+        return penalties.mean()
+
+    def forward(self, x):
+        output = self.inner_sae(x)
+        decomp_penalty = self.compute_decomposability_penalty()
+        output["decomp_penalty"] = decomp_penalty
+        output["loss"] = output["loss"] + self.penalty_lambda * decomp_penalty
+        return output
+
+    def make_decoder_weights_and_grad_unit_norm(self):
+        if hasattr(self.inner_sae, 'make_decoder_weights_and_grad_unit_norm'):
+            self.inner_sae.make_decoder_weights_and_grad_unit_norm()
 
 
 class BatchTopKSAEWithPenalty(BatchTopKSAE):

@@ -20,8 +20,11 @@ def build_common_arg_parser(description: str = "Common Arg Parser") -> argparse.
 
     # Data & model hooks
     parser.add_argument("--dataset_path", type=str, required=False,
-                        default="vietgpt/openwebtext_en",
+                        default="HuggingFaceFW/fineweb",
                         help="HuggingFace dataset identifier (supports streaming)")
+    parser.add_argument("--dataset_name", type=str, required=False,
+                        default="sample-10BT",
+                        help="Dataset subset/config name (e.g., 'sample-10BT' for FineWeb)")
     parser.add_argument("--layer", type=int, default=8, help="Transformer layer to hook (0‑indexed)")
     parser.add_argument("--site", type=str, default="resid_pre", help="Hook site (resid_pre, resid_post, mlp_out, attn_out)")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use")
@@ -35,6 +38,16 @@ def build_common_arg_parser(description: str = "Common Arg Parser") -> argparse.
     parser.add_argument("--meta_dict_size", type=int, default=1536, help="Meta SAE dictionary size")
     parser.add_argument("--primary_top_k", type=int, default=32, help="Top-K for primary BatchTopK SAE")
     parser.add_argument("--meta_top_k", type=int, default=4, help="Top-K for meta BatchTopK SAE")
+
+    # SAE types
+    parser.add_argument("--primary_sae_type", type=str, default="batchtopk",
+                        choices=["batchtopk", "jumprelu", "topk", "vanilla"],
+                        help="SAE architecture for primary SAE")
+    parser.add_argument("--meta_sae_type", type=str, default="batchtopk",
+                        choices=["batchtopk", "jumprelu", "topk", "vanilla"],
+                        help="SAE architecture for meta SAE")
+    parser.add_argument("--bandwidth", type=float, default=0.001,
+                        help="Bandwidth for JumpReLU SAE (epsilon parameter)")
 
     # Training hyperparameters (for training script)
     parser.add_argument("--num_tokens", type=int, default=100000000, help="Number of tokens to process during training")
@@ -75,13 +88,18 @@ def parse_args_common(parser: argparse.ArgumentParser) -> argparse.Namespace:
     Common argument parsing logic for both training and assessment scripts.
     Handles interactive mode detection and Jupyter kernel argument filtering.
     """
-    try:        
+    # Default dataset configuration
+    DEFAULT_DATASET_PATH = "HuggingFaceFW/fineweb"
+    DEFAULT_DATASET_NAME = "sample-10BT"
+
+    try:
         filtered_argv = [arg for arg in sys.argv if not arg.startswith('--f=')]
         if len(filtered_argv) == 1 or any('ipykernel' in arg for arg in sys.argv):
             print("🧪 Interactive mode detected, using parser defaults")
             args = parser.parse_args([])
             if getattr(args, 'dataset_path', None) is None:
-                args.dataset_path = "vietgpt/openwebtext_en"
+                args.dataset_path = DEFAULT_DATASET_PATH
+                args.dataset_name = DEFAULT_DATASET_NAME
             return args
         else:
             original_argv = sys.argv
@@ -89,8 +107,9 @@ def parse_args_common(parser: argparse.ArgumentParser) -> argparse.Namespace:
             try:
                 args = parser.parse_args()
                 if getattr(args, 'dataset_path', None) is None:
-                    args.dataset_path = "vietgpt/openwebtext_en"
-                    print("⚠️ No dataset_path provided, using default: vietgpt/openwebtext_en")
+                    args.dataset_path = DEFAULT_DATASET_PATH
+                    args.dataset_name = DEFAULT_DATASET_NAME
+                    print(f"⚠️ No dataset_path provided, using default: {DEFAULT_DATASET_PATH}/{DEFAULT_DATASET_NAME}")
                 return args
             finally:
                 sys.argv = original_argv
@@ -98,7 +117,8 @@ def parse_args_common(parser: argparse.ArgumentParser) -> argparse.Namespace:
         print("🧪 Failed to parse command line args, using parser defaults")
         args = parser.parse_args([])
         if getattr(args, 'dataset_path', None) is None:
-            args.dataset_path = "vietgpt/openwebtext_en"
+            args.dataset_path = DEFAULT_DATASET_PATH
+            args.dataset_name = DEFAULT_DATASET_NAME
     return args
 
 

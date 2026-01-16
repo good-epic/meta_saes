@@ -346,10 +346,17 @@ class ReconstructionAssessor:
         model_batch_size = min(self.sae.cfg.get("model_batch_size", 64), 32)
         seq_len = self.sae.cfg.get("seq_len", 128)
 
+        # Get dataset config from SAE config
+        dataset_path = self.sae.cfg.get("dataset_path", "HuggingFaceFW/fineweb")
+        dataset_name = self.sae.cfg.get("dataset_name", "sample-10BT")
+
         # Create a fresh streaming data loader for CE assessment
         from datasets import load_dataset
-        dataset = load_dataset("vietgpt/openwebtext_en", streaming=True, split="train")
-        
+        if dataset_name:
+            dataset = load_dataset(dataset_path, name=dataset_name, streaming=True, split="train")
+        else:
+            dataset = load_dataset(dataset_path, streaming=True, split="train")
+
         pbar = tqdm(range(num_batches), desc="Assessing CE Impact")
         for _ in pbar:
             # Get a fresh batch of tokens from the streaming dataset
@@ -360,7 +367,10 @@ class ReconstructionAssessor:
                     batch_texts.append(example["text"])
                 except StopIteration:
                     # If dataset is exhausted, restart
-                    dataset = load_dataset("vietgpt/openwebtext_en", streaming=True, split="train")
+                    if dataset_name:
+                        dataset = load_dataset(dataset_path, name=dataset_name, streaming=True, split="train")
+                    else:
+                        dataset = load_dataset(dataset_path, streaming=True, split="train")
                     example = next(iter(dataset))
                     batch_texts.append(example["text"])
             
