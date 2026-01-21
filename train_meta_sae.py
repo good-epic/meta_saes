@@ -150,9 +150,27 @@ print_configs(cfg, meta_cfg, penalty_cfg)
 print("🚀 Starting comprehensive training pipeline...")
 print("Will train 3 SAE variants for comparison:")
 print("1. Joint training: Primary + Meta SAE together")
-print("2. Solo training: Primary SAE without meta penalty") 
+print("2. Solo training: Primary SAE without meta penalty")
 print("3. Sequential training: Meta SAE on frozen solo primary")
 print("="*60)
+
+# Initialize metrics collection
+all_metrics = {
+    "joint": None,
+    "solo": None,
+    "sequential_meta": None,
+    "config": {
+        "lambda2": penalty_cfg["lambda2"],
+        "sigma_sq": penalty_cfg["sigma_sq"],
+        "dict_size": cfg["dict_size"],
+        "meta_dict_size": meta_cfg["dict_size"],
+        "primary_sae_type": cfg["sae_type"],
+        "meta_sae_type": meta_cfg["sae_type"],
+        "primary_top_k": cfg["top_k"],
+        "meta_top_k": meta_cfg["top_k"],
+        "num_tokens": cfg["num_tokens"],
+    }
+}
 
 if args.train_joint_saes:
     # ===== 1. JOINT TRAINING =====
@@ -176,7 +194,8 @@ if args.train_joint_saes:
     print("="*60)
     if torch.cuda.is_available():
         print(f"🔍 Memory at start of joint training - Allocated: {torch.cuda.memory_allocated() / 1e9:.1f}GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.1f}GB")
-    train_sae_with_meta(primary_sae, meta_sae, activation_store, model, cfg, meta_cfg, penalty_cfg)
+    joint_metrics = train_sae_with_meta(primary_sae, meta_sae, activation_store, model, cfg, meta_cfg, penalty_cfg)
+    all_metrics["joint"] = joint_metrics
 
     # Memory cleanup after joint training
     print("\n🧹 Cleaning up memory after joint training...")
@@ -238,8 +257,9 @@ if args.train_sequential_saes:
     print(f"Creating solo primary SAE ({cfg['sae_type']})...")
     solo_primary_sae = solo_primary_sae_cls(cfg)
     if torch.cuda.is_available():
-        print(f"�� Memory at start of solo training - Allocated: {torch.cuda.memory_allocated() / 1e9:.1f}GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.1f}GB")
-    train_primary_sae_solo(solo_primary_sae, solo_activation_store, cfg)
+        print(f"🔍 Memory at start of solo training - Allocated: {torch.cuda.memory_allocated() / 1e9:.1f}GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.1f}GB")
+    solo_metrics = train_primary_sae_solo(solo_primary_sae, solo_activation_store, cfg)
+    all_metrics["solo"] = solo_metrics
 
     # Memory cleanup after solo training
     print("\n🧹 Cleaning up memory after solo training...")
@@ -283,7 +303,8 @@ if args.train_sequential_saes:
     sequential_meta_sae = MetaSAEWrapper(sequential_meta_sae_cls, meta_cfg)
     if torch.cuda.is_available():
         print(f"🔍 Memory at start of sequential training - Allocated: {torch.cuda.memory_allocated() / 1e9:.1f}GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.1f}GB")
-    train_meta_sae_on_frozen_primary(sequential_meta_sae, solo_primary_sae, meta_cfg, penalty_cfg)
+    seq_meta_metrics = train_meta_sae_on_frozen_primary(sequential_meta_sae, solo_primary_sae, meta_cfg, penalty_cfg)
+    all_metrics["sequential_meta"] = seq_meta_metrics
 
     # Memory cleanup after sequential training
     print("\n🧹 Cleaning up memory after sequential training...")
@@ -374,6 +395,14 @@ torch.cuda.empty_cache()
 
 if torch.cuda.is_available():
     print(f"   Memory after cleanup - Allocated: {torch.cuda.memory_allocated() / 1e9:.1f}GB, Reserved: {torch.cuda.memory_reserved() / 1e9:.1f}GB")
+
+# Save metrics to JSON (same directory as model files)
+from pathlib import Path
+metrics_path = Path(args.joint_primary_path).parent / "metrics.json"
+print(f"💾 Saving metrics to {metrics_path}...")
+with open(metrics_path, 'w') as f:
+    json.dump(all_metrics, f, indent=2)
+print(f"   ✅ Metrics saved!")
 
 print("All models saved and memory cleaned up.")
 

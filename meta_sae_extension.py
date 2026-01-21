@@ -346,6 +346,9 @@ def train_sae_with_meta(
     # Log frequency - reduce .item() calls which cause CPU-GPU sync
     log_freq = 50
 
+    # Track final metrics
+    final_metrics = {}
+
     first_batch_logged = False
     while batch_iter < total_batches:
         # Primary SAE phase
@@ -372,11 +375,17 @@ def train_sae_with_meta(
 
             # Only log every log_freq steps to reduce CPU-GPU sync from .item() calls
             if batch_iter % log_freq == 0:
+                final_metrics = {
+                    "loss": loss.item(),
+                    "l0": output['l0_norm'].item(),
+                    "l2": output['l2_loss'].item(),
+                    "decomp": output.get('decomp_penalty', torch.tensor(0.0)).item()
+                }
                 pbar.set_postfix({
-                    "Loss": f"{loss.item():.4f}",
-                    "L0": f"{output['l0_norm'].item():.1f}",
-                    "L2": f"{output['l2_loss'].item():.4f}",
-                    "Decomp": f"{output.get('decomp_penalty', torch.tensor(0.0)).item():.4f}"
+                    "Loss": f"{final_metrics['loss']:.4f}",
+                    "L0": f"{final_metrics['l0']:.1f}",
+                    "L2": f"{final_metrics['l2']:.4f}",
+                    "Decomp": f"{final_metrics['decomp']:.4f}"
                 })
 
             # Explicit cleanup to prevent memory leaks
@@ -400,9 +409,11 @@ def train_sae_with_meta(
 
             # Cleanup meta SAE training variables
             del W_dec, meta_output, meta_loss
-        
+
     # Close progress bar
     pbar.close()
+
+    return final_metrics
 
 
 def train_primary_sae_solo(primary_sae, activation_store, cfg):
@@ -437,6 +448,9 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg):
     # Log frequency - reduce .item() calls which cause CPU-GPU sync
     log_freq = 50
 
+    # Track final metrics
+    final_metrics = {}
+
     for step in range(num_batches):
         # Get batch
         try:
@@ -466,12 +480,19 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg):
 
         # Only log every log_freq steps to reduce CPU-GPU sync from .item() calls
         if (step + 1) % log_freq == 0:
+            final_metrics = {
+                'loss': loss.item(),
+                'l2': output["l2_loss"].item(),
+                'l1': output["l1_loss"].item(),
+                'l0': output["l0_norm"].item(),
+                'dead': output["num_dead_features"].item()
+            }
             pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'l2': f'{output["l2_loss"].item():.4f}',
-                'l1': f'{output["l1_loss"].item():.4f}',
-                'l0': f'{output["l0_norm"].item():.1f}',
-                'dead': f'{output["num_dead_features"].item()}'
+                'loss': f'{final_metrics["loss"]:.4f}',
+                'l2': f'{final_metrics["l2"]:.4f}',
+                'l1': f'{final_metrics["l1"]:.4f}',
+                'l0': f'{final_metrics["l0"]:.1f}',
+                'dead': f'{final_metrics["dead"]}'
             })
 
         # Memory cleanup
@@ -483,6 +504,8 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg):
 
     pbar.close()
     print("✅ Solo primary SAE training completed!")
+
+    return final_metrics
 
 
 def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cfg):
@@ -525,6 +548,9 @@ def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cf
     # Log frequency - reduce .item() calls which cause CPU-GPU sync
     log_freq = 50
 
+    # Track final metrics
+    final_metrics = {}
+
     for step in range(total_meta_steps):
         # Get decoder weights (constant input)
         W_dec = primary_sae.W_dec.detach()  # Shape: [dict_size, act_size]
@@ -546,10 +572,15 @@ def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cf
 
         # Only log every log_freq steps to reduce CPU-GPU sync from .item() calls
         if (step + 1) % log_freq == 0:
+            final_metrics = {
+                'loss': meta_loss.item(),
+                'l2': meta_output["l2_loss"].item(),
+                'l0': meta_output["l0_norm"].item(),
+            }
             pbar.set_postfix({
-                'loss': f'{meta_loss.item():.4f}',
-                'l2': f'{meta_output["l2_loss"].item():.4f}',
-                'l0': f'{meta_output["l0_norm"].item():.1f}',
+                'loss': f'{final_metrics["loss"]:.4f}',
+                'l2': f'{final_metrics["l2"]:.4f}',
+                'l0': f'{final_metrics["l0"]:.1f}',
             })
 
         # Memory cleanup
@@ -561,8 +592,10 @@ def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cf
 
     pbar.close()
     print("✅ Meta SAE training on frozen primary completed!")
-    
+
     # Unfreeze primary SAE (restore original state)
     for param in primary_sae.parameters():
         param.requires_grad = True
     primary_sae.train()
+
+    return final_metrics
