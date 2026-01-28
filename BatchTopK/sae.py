@@ -259,7 +259,9 @@ class JumpReLUSAE(BaseAutoencoder):
     def __init__(self, cfg):
         super().__init__(cfg)
         # Learnable threshold per feature (direct, not log-space)
-        init_threshold = cfg.get("jumprelu_init_threshold", 0.001)
+        init_threshold = cfg.get("jumprelu_init_threshold")
+        if init_threshold is None:
+            init_threshold = 0.001  # Default if not specified or explicitly None
         self.threshold = nn.Parameter(
             torch.full((cfg["dict_size"],), init_threshold, device=cfg["device"], dtype=cfg["dtype"])
         )
