@@ -1,3 +1,4 @@
+outputs
 sae_latents_not_atomic
 *.pkl
 *.pt
