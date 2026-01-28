@@ -353,6 +353,8 @@ def train_sae_with_meta(
     # Alternate training
     # Log frequency - reduce .item() calls which cause CPU-GPU sync
     log_freq = 50
+    # Stdout print frequency (less frequent to avoid spam)
+    print_freq = 500
 
     # Track final metrics
     final_metrics = {}
@@ -399,6 +401,11 @@ def train_sae_with_meta(
                 # Log to structured logger
                 if logger is not None:
                     logger.log_step(batch_iter, "joint_primary", output)
+
+                # Print to stdout periodically (for monitoring when output redirected)
+                if batch_iter % print_freq == 0:
+                    l0_coeff_str = f", l0_coeff={output.get('l0_coeff', 'N/A'):.2e}" if 'l0_coeff' in output else ""
+                    print(f"[Joint Primary] step={batch_iter}/{total_batches} loss={final_metrics['loss']:.4f} L0={final_metrics['l0']:.1f} L2={final_metrics['l2']:.4f}{l0_coeff_str}", flush=True)
 
             # Explicit cleanup to prevent memory leaks
             del batch, output, loss
@@ -466,6 +473,8 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg, logger: Optional[
 
     # Log frequency - reduce .item() calls which cause CPU-GPU sync
     log_freq = 50
+    # Stdout print frequency
+    print_freq = 500
 
     # Track final metrics
     final_metrics = {}
@@ -518,6 +527,11 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg, logger: Optional[
             if logger is not None:
                 logger.log_step(step + 1, "solo_primary", output)
 
+            # Print to stdout periodically
+            if (step + 1) % print_freq == 0:
+                l0_coeff_str = f", l0_coeff={output.get('l0_coeff', 'N/A'):.2e}" if 'l0_coeff' in output else ""
+                print(f"[Solo Primary] step={step+1}/{num_batches} loss={final_metrics['loss']:.4f} L0={final_metrics['l0']:.1f} L2={final_metrics['l2']:.4f}{l0_coeff_str}", flush=True)
+
         # Memory cleanup
         del batch, output, loss
 
@@ -526,7 +540,7 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg, logger: Optional[
             torch.cuda.empty_cache()
 
     pbar.close()
-    print("✅ Solo primary SAE training completed!")
+    print("✅ Solo primary SAE training completed!", flush=True)
 
     return final_metrics
 
@@ -571,6 +585,8 @@ def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cf
 
     # Log frequency - reduce .item() calls which cause CPU-GPU sync
     log_freq = 50
+    # Stdout print frequency
+    print_freq = 500
 
     # Track final metrics
     final_metrics = {}
@@ -611,6 +627,10 @@ def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cf
             if logger is not None:
                 logger.log_step(step + 1, "sequential_meta", meta_output)
 
+            # Print to stdout periodically
+            if (step + 1) % print_freq == 0:
+                print(f"[Sequential Meta] step={step+1}/{total_meta_steps} loss={final_metrics['loss']:.4f} L0={final_metrics['l0']:.1f} L2={final_metrics['l2']:.4f}", flush=True)
+
         # Memory cleanup
         del W_dec, meta_output, meta_loss
 
@@ -619,7 +639,7 @@ def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cf
             torch.cuda.empty_cache()
 
     pbar.close()
-    print("✅ Meta SAE training on frozen primary completed!")
+    print("✅ Meta SAE training on frozen primary completed!", flush=True)
 
     # Unfreeze primary SAE (restore original state)
     for param in primary_sae.parameters():

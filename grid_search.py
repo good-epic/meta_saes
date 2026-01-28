@@ -269,7 +269,7 @@ def run_single_job(
         "error": None,
     }
 
-    print(f"[{job_index + 1}/{total_jobs}] Starting {run_id} on {device}")
+    print(f"[{job_index + 1}/{total_jobs}] Starting {run_id} on {device}", flush=True)
 
     start_time = time.time()
 
@@ -302,11 +302,11 @@ def run_single_job(
 
         if process.returncode == 0:
             result["status"] = "success"
-            print(f"[{job_index + 1}/{total_jobs}] Completed {run_id} in {result['duration_seconds']:.1f}s")
+            print(f"[{job_index + 1}/{total_jobs}] Completed {run_id} in {result['duration_seconds']:.1f}s", flush=True)
         else:
             result["status"] = "failed"
             result["error"] = f"Process exited with code {process.returncode}"
-            print(f"[{job_index + 1}/{total_jobs}] FAILED {run_id} (exit code {process.returncode})")
+            print(f"[{job_index + 1}/{total_jobs}] FAILED {run_id} (exit code {process.returncode})", flush=True)
 
     except Exception as e:
         end_time = time.time()
@@ -314,7 +314,7 @@ def run_single_job(
         result["duration_seconds"] = end_time - start_time
         result["status"] = "error"
         result["error"] = str(e)
-        print(f"[{job_index + 1}/{total_jobs}] ERROR {run_id}: {e}")
+        print(f"[{job_index + 1}/{total_jobs}] ERROR {run_id}: {e}", flush=True)
 
     # Save result
     with open(run_dir / "result.json", "w") as f:
@@ -558,7 +558,9 @@ Examples:
     # Auto-generate output dir with timestamp if not specified
     if args.output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path(f"outputs/grid_search_{timestamp}")
+        # Use absolute path relative to this script's location
+        script_dir = Path(__file__).parent.resolve()
+        output_dir = script_dir / f"outputs/grid_search_{timestamp}"
     else:
         output_dir = Path(args.output_dir)
 
@@ -576,13 +578,13 @@ Examples:
     else:
         runs_to_do = all_runs
 
-    print(f"\n{'='*60}")
-    print(f"Grid Search Configuration")
-    print(f"{'='*60}")
-    print(f"Total combinations: {len(all_runs)}")
-    print(f"Runs to execute: {len(runs_to_do)}")
-    print(f"Concurrent workers: {args.num_workers}")
-    print(f"Output directory: {output_dir}")
+    print(f"\n{'='*60}", flush=True)
+    print(f"Grid Search Configuration", flush=True)
+    print(f"{'='*60}", flush=True)
+    print(f"Total combinations: {len(all_runs)}", flush=True)
+    print(f"Runs to execute: {len(runs_to_do)}", flush=True)
+    print(f"Concurrent workers: {args.num_workers}", flush=True)
+    print(f"Output directory: {output_dir}", flush=True)
     print(f"\nModel settings:")
     print(f"  model_name: {config.model_name}")
     print(f"  layer: {config.layer}")
@@ -639,7 +641,7 @@ Examples:
     start_time = time.time()
 
     # Run jobs with process pool
-    print(f"Starting {len(runs_to_do)} jobs with {args.num_workers} workers...\n")
+    print(f"Starting {len(runs_to_do)} jobs with {args.num_workers} workers...\n", flush=True)
 
     with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
         futures = {
@@ -654,13 +656,19 @@ Examples:
             for i, params in enumerate(runs_to_do)
         }
 
+        completed_count = 0
         for future in as_completed(futures):
             params = futures[future]
+            completed_count += 1
             try:
                 result = future.result()
                 all_results.append(result)
+                # Print progress to stdout
+                status = "✓" if result.get("status") == "success" else "✗"
+                duration = result.get("duration_seconds", 0)
+                print(f"[{completed_count}/{len(runs_to_do)}] {status} {params['run_id']} ({duration:.0f}s)", flush=True)
             except Exception as e:
-                print(f"Job {params['run_id']} raised exception: {e}")
+                print(f"[{completed_count}/{len(runs_to_do)}] ✗ {params['run_id']} EXCEPTION: {e}", flush=True)
                 all_results.append({
                     "run_id": params['run_id'],
                     "status": "exception",

@@ -30,7 +30,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="${PROJECT_ROOT}/outputs"
+OUTPUT_DIR="/workspace/outputs"
 
 mkdir -p "$OUTPUT_DIR"
 cd "$PROJECT_ROOT"
@@ -110,7 +110,7 @@ fi
 # Build command
 # -----------------------------------------------------------------------------
 
-CMD="python grid_search.py"
+CMD="python -u grid_search.py"
 CMD="$CMD --num_workers ${NUM_WORKERS}"
 CMD="$CMD --output_dir ${GRID_OUTPUT_DIR}"
 CMD="$CMD --model_name ${MODEL_NAME}"
