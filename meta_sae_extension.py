@@ -56,9 +56,15 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import tqdm
 import torch.optim as optim
+
+# Import training logger
+try:
+    from training_logger import TrainingLogger
+except ImportError:
+    TrainingLogger = None
 
 try:
     # Import the existing SAE classes from the repository.  If this
@@ -285,7 +291,8 @@ def train_sae_with_meta(
     primary_cfg: Dict[str, Any],
     meta_cfg: Dict[str, Any],
     penalty_cfg: Dict[str, Any],
-) -> None:
+    logger: Optional["TrainingLogger"] = None,
+) -> Dict[str, Any]:
     """Train a primary SAE with an alternating meta SAE training loop.
 
     The training alternates between updating the primary SAE on model
@@ -338,10 +345,11 @@ def train_sae_with_meta(
     # Determine number of total batches from primary config
     total_batches = primary_cfg["num_tokens"] // primary_cfg["batch_size"]
     batch_iter = 0
-    
+    meta_step_global = 0
+
     # Create progress bar for overall training
     pbar = tqdm.tqdm(total=total_batches, desc="Training SAE + Meta SAE")
-    
+
     # Alternate training
     # Log frequency - reduce .item() calls which cause CPU-GPU sync
     log_freq = 50
@@ -388,6 +396,10 @@ def train_sae_with_meta(
                     "Decomp": f"{final_metrics['decomp']:.4f}"
                 })
 
+                # Log to structured logger
+                if logger is not None:
+                    logger.log_step(batch_iter, "joint_primary", output)
+
             # Explicit cleanup to prevent memory leaks
             del batch, output, loss
 
@@ -407,6 +419,12 @@ def train_sae_with_meta(
             meta_optimizer.step()
             meta_optimizer.zero_grad()
 
+            meta_step_global += 1
+
+            # Log meta SAE metrics periodically
+            if logger is not None and meta_step_global % log_freq == 0:
+                logger.log_step(meta_step_global, "joint_meta", meta_output)
+
             # Cleanup meta SAE training variables
             del W_dec, meta_output, meta_loss
 
@@ -416,14 +434,15 @@ def train_sae_with_meta(
     return final_metrics
 
 
-def train_primary_sae_solo(primary_sae, activation_store, cfg):
+def train_primary_sae_solo(primary_sae, activation_store, cfg, logger: Optional["TrainingLogger"] = None):
     """
     Train a primary SAE without any meta SAE or decomposability penalty.
-    
+
     Args:
         primary_sae: Primary SAE model (should be regular BatchTopKSAE, not BatchTopKSAEWithPenalty)
         activation_store: Source of activation batches
         cfg: Primary SAE configuration
+        logger: Optional TrainingLogger for structured metric logging
     """
     
     print(f"🚀 Training solo primary SAE...")
@@ -495,6 +514,10 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg):
                 'dead': f'{final_metrics["dead"]}'
             })
 
+            # Log to structured logger
+            if logger is not None:
+                logger.log_step(step + 1, "solo_primary", output)
+
         # Memory cleanup
         del batch, output, loss
 
@@ -508,15 +531,16 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg):
     return final_metrics
 
 
-def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cfg):
+def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cfg, logger: Optional["TrainingLogger"] = None):
     """
     Train a meta SAE on the frozen decoder weights of a pre-trained primary SAE.
-    
+
     Args:
         meta_sae: Meta SAE wrapper
         primary_sae: Pre-trained primary SAE (will be frozen)
-        meta_cfg: Meta SAE configuration  
+        meta_cfg: Meta SAE configuration
         penalty_cfg: Penalty configuration (used for n_meta_steps)
+        logger: Optional TrainingLogger for structured metric logging
     """
     
     print(f"🚀 Training meta SAE on frozen primary SAE...")
@@ -582,6 +606,10 @@ def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cf
                 'l2': f'{final_metrics["l2"]:.4f}',
                 'l0': f'{final_metrics["l0"]:.1f}',
             })
+
+            # Log to structured logger
+            if logger is not None:
+                logger.log_step(step + 1, "sequential_meta", meta_output)
 
         # Memory cleanup
         del W_dec, meta_output, meta_loss

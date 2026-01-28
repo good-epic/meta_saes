@@ -19,6 +19,9 @@ def build_common_arg_parser(description: str = "Common Arg Parser") -> argparse.
     parser = argparse.ArgumentParser(description=description)
 
     # Data & model hooks
+    parser.add_argument("--model_name", type=str, default="gpt2-small",
+                        choices=["gpt2-small", "gpt2-medium", "gpt2-large"],
+                        help="Transformer model to use")
     parser.add_argument("--dataset_path", type=str, required=False,
                         default="HuggingFaceFW/fineweb",
                         help="HuggingFace dataset identifier (supports streaming)")
@@ -47,7 +50,22 @@ def build_common_arg_parser(description: str = "Common Arg Parser") -> argparse.
                         choices=["batchtopk", "jumprelu", "topk", "vanilla"],
                         help="SAE architecture for meta SAE")
     parser.add_argument("--bandwidth", type=float, default=0.001,
-                        help="Bandwidth for JumpReLU SAE (epsilon parameter)")
+                        help="Bandwidth for JumpReLU sigmoid STE (lower = sharper threshold)")
+    parser.add_argument("--jumprelu_init_threshold", type=float, default=None,
+                        help="Initial threshold value for JumpReLU features (default: 0.001)")
+
+    # JumpReLU sparsity control (two modes):
+    # Fixed mode: set l0_coeff directly
+    parser.add_argument("--l0_coeff", type=float, default=None,
+                        help="Fixed L0 sparsity coefficient (if set, uses fixed mode)")
+
+    # Dynamic mode: coefficient adapts to achieve target_l0
+    parser.add_argument("--target_l0", type=int, default=None,
+                        help="Target L0 sparsity for dynamic coefficient adaptation")
+    parser.add_argument("--l0_coeff_start", type=float, default=1e-5,
+                        help="Initial L0 coefficient for dynamic mode (default: 1e-5)")
+    parser.add_argument("--l0_coeff_lr", type=float, default=1e-4,
+                        help="Learning rate for L0 coefficient updates (default: 1e-4)")
 
     # Training hyperparameters (for training script)
     parser.add_argument("--num_tokens", type=int, default=100000000, help="Number of tokens to process during training")

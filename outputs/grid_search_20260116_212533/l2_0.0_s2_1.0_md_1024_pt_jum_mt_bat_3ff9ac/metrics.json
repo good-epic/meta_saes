@@ -1,0 +1,31 @@
+{
+  "joint": {
+    "loss": 0.009,
+    "l0": 624.6,
+    "l2": 0.009,
+    "decomp": 0.5904
+  },
+  "solo": {
+    "loss": 0.0089,
+    "l2": 0.0089,
+    "l1": 0.0,
+    "l0": 626.2,
+    "dead": 0
+  },
+  "sequential_meta": {
+    "loss": 0.5245,
+    "l2": 0.5245,
+    "l0": 4.0
+  },
+  "config": {
+    "lambda2": 0.0,
+    "sigma_sq": 1.0,
+    "dict_size": 12288,
+    "meta_dict_size": 1024,
+    "primary_sae_type": "jumprelu",
+    "meta_sae_type": "batchtopk",
+    "primary_top_k": 32,
+    "meta_top_k": 4,
+    "num_tokens": 100000000
+  }
+}

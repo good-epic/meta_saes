@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.autograd as autograd
 
 
 class BaseAutoencoder(nn.Module):
@@ -231,80 +230,86 @@ class VanillaSAE(BaseAutoencoder):
         return output
 
 
-import torch
-import torch.nn as nn
-import torch.autograd as autograd
-
-class RectangleFunction(autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        ctx.save_for_backward(x)
-        return ((x > -0.5) & (x < 0.5)).float()
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        (x,) = ctx.saved_tensors
-        grad_input = grad_output.clone()
-        grad_input[(x <= -0.5) | (x >= 0.5)] = 0
-        return grad_input
-
-class JumpReLUFunction(autograd.Function):
-    @staticmethod
-    def forward(ctx, x, log_threshold, bandwidth):
-        # Create bandwidth tensor on same device as x to avoid CPU-GPU sync
-        bandwidth_tensor = torch.tensor(bandwidth, device=x.device, dtype=x.dtype)
-        ctx.save_for_backward(x, log_threshold, bandwidth_tensor)
-        threshold = torch.exp(log_threshold)
-        return x * (x > threshold).float()
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        x, log_threshold, bandwidth_tensor = ctx.saved_tensors
-        # bandwidth_tensor is already on GPU, no .item() needed for scalar ops
-        threshold = torch.exp(log_threshold)
-        x_grad = (x > threshold).float() * grad_output
-        threshold_grad = (
-            -(threshold / bandwidth_tensor)
-            * RectangleFunction.apply((x - threshold) / bandwidth_tensor)
-            * grad_output
-        )
-        return x_grad, threshold_grad, None  # None for bandwidth
-
-class JumpReLU(nn.Module):
-    def __init__(self, feature_size, bandwidth, device='cpu'):
-        super(JumpReLU, self).__init__()
-        self.log_threshold = nn.Parameter(torch.zeros(feature_size, device=device))
-        self.bandwidth = bandwidth
-
-    def forward(self, x):
-        return JumpReLUFunction.apply(x, self.log_threshold, self.bandwidth)
-
-class StepFunction(autograd.Function):
-    @staticmethod
-    def forward(ctx, x, log_threshold, bandwidth):
-        # Create bandwidth tensor on same device as x to avoid CPU-GPU sync
-        bandwidth_tensor = torch.tensor(bandwidth, device=x.device, dtype=x.dtype)
-        ctx.save_for_backward(x, log_threshold, bandwidth_tensor)
-        threshold = torch.exp(log_threshold)
-        return (x > threshold).float()
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        x, log_threshold, bandwidth_tensor = ctx.saved_tensors
-        # bandwidth_tensor is already on GPU, no .item() needed
-        threshold = torch.exp(log_threshold)
-        x_grad = torch.zeros_like(x)
-        threshold_grad = (
-            -(1.0 / bandwidth_tensor)
-            * RectangleFunction.apply((x - threshold) / bandwidth_tensor)
-            * grad_output
-        )
-        return x_grad, threshold_grad, None  # None for bandwidth
-
 class JumpReLUSAE(BaseAutoencoder):
+    """
+    JumpReLU SAE with proper L0 sparsity penalty using sigmoid STE.
+
+    Uses x * H(x - θ) activation where:
+    - Forward: hard threshold (preserves full magnitude, no shrinkage)
+    - Backward for activations: straight-through (gradient flows through pre_acts)
+    - Backward for threshold: sigmoid surrogate provides smooth gradients
+
+    Sparsity modes:
+    1. Fixed mode: Set l0_coeff directly, sparsity penalty = l0_coeff * L0
+    2. Dynamic mode: Set target_l0, coefficient adapts to achieve target sparsity
+
+    Key config params:
+    - bandwidth: Temperature for sigmoid STE (lower = sharper, default 0.001)
+    - jumprelu_init_threshold: Initial threshold value (default 0.001)
+
+    Fixed mode:
+    - l0_coeff: Fixed sparsity coefficient
+
+    Dynamic mode (if target_l0 is set):
+    - target_l0: Target L0 sparsity to achieve
+    - l0_coeff_start: Initial sparsity coefficient (default 1e-5, start low)
+    - l0_coeff_lr: Learning rate for coefficient updates (default 1e-4)
+    """
+
     def __init__(self, cfg):
         super().__init__(cfg)
-        self.jumprelu = JumpReLU(feature_size=cfg["dict_size"], bandwidth=cfg["bandwidth"], device=cfg["device"])
+        # Learnable threshold per feature (direct, not log-space)
+        init_threshold = cfg.get("jumprelu_init_threshold", 0.001)
+        self.threshold = nn.Parameter(
+            torch.full((cfg["dict_size"],), init_threshold, device=cfg["device"], dtype=cfg["dtype"])
+        )
+        self.bandwidth = cfg.get("bandwidth", 0.001)
+
+        # Sparsity coefficient setup
+        self.target_l0 = cfg.get("target_l0", None)
+        if self.target_l0 is not None:
+            # Dynamic mode: start with low coefficient, adapt during training
+            self.l0_coeff = cfg.get("l0_coeff_start", 1e-5)
+            self.l0_coeff_lr = cfg.get("l0_coeff_lr", 1e-4)
+            # Track running average of L0 for smoother updates
+            self.l0_ema = None
+            self.l0_ema_decay = 0.99
+        else:
+            # Fixed mode: use l0_coeff directly (fall back to l1_coeff for backwards compat)
+            self.l0_coeff = cfg.get("l0_coeff", cfg.get("l1_coeff", 0.0))
+
+    def update_l0_coeff(self, current_l0):
+        """
+        Update sparsity coefficient to move toward target L0.
+        Called after each forward pass in dynamic mode.
+
+        Uses proportional control: if L0 > target, increase coefficient to encourage
+        more sparsity. If L0 < target, decrease coefficient.
+        """
+        if self.target_l0 is None:
+            return  # Fixed mode, no update
+
+        # Update EMA of L0 for smoother coefficient updates
+        current_l0_val = current_l0.item() if torch.is_tensor(current_l0) else current_l0
+        if self.l0_ema is None:
+            self.l0_ema = current_l0_val
+        else:
+            self.l0_ema = self.l0_ema_decay * self.l0_ema + (1 - self.l0_ema_decay) * current_l0_val
+
+        # Proportional control: error = current - target
+        # Positive error (too many features) -> increase coefficient
+        # Negative error (too few features) -> decrease coefficient
+        error = self.l0_ema - self.target_l0
+
+        # Update coefficient (multiplicative for stability across scales)
+        # Use tanh to bound the update magnitude
+        update_factor = 1.0 + self.l0_coeff_lr * (error / max(self.target_l0, 1.0))
+        update_factor = max(0.9, min(1.1, update_factor))  # Clamp to avoid instability
+
+        self.l0_coeff = self.l0_coeff * update_factor
+
+        # Clamp coefficient to reasonable range
+        self.l0_coeff = max(1e-8, min(1.0, self.l0_coeff))
 
     def forward(self, x, use_pre_enc_bias=False):
         x, x_mean, x_std = self.preprocess_input(x)
@@ -312,21 +317,41 @@ class JumpReLUSAE(BaseAutoencoder):
         if use_pre_enc_bias:
             x = x - self.b_dec
 
-        pre_activations = torch.relu(x @ self.W_enc + self.b_enc)
-        feature_magnitudes = self.jumprelu(pre_activations)
+        # Pre-activations (before thresholding)
+        pre_acts = F.relu(x @ self.W_enc + self.b_enc)
 
-        x_reconstructed = feature_magnitudes @ self.W_dec + self.b_dec
+        # JumpReLU: x * H(x - θ)
+        # Forward uses hard threshold, gradient flows through pre_acts (straight-through)
+        mask = (pre_acts > self.threshold).float()
+        acts = pre_acts * mask
 
-        return self.get_loss_dict(x, x_reconstructed, feature_magnitudes, x_mean, x_std)
+        x_reconstruct = acts @ self.W_dec + self.b_dec
 
-    def get_loss_dict(self, x, x_reconstruct, acts, x_mean, x_std):
+        self.update_inactive_features(acts)
+
+        return self.get_loss_dict(x, x_reconstruct, pre_acts, acts, x_mean, x_std)
+
+    def get_loss_dict(self, x, x_reconstruct, pre_acts, acts, x_mean, x_std):
+        # Reconstruction loss
         l2_loss = (x_reconstruct.float() - x.float()).pow(2).mean()
 
-        l0 = StepFunction.apply(acts, self.jumprelu.log_threshold, self.cfg["bandwidth"]).sum(dim=-1).mean()
-        l0_loss = self.cfg["l1_coeff"] * l0
-        l1_loss = l0_loss
+        # L0 sparsity using sigmoid STE for differentiable threshold learning
+        # sigmoid((x - θ) / bandwidth) ≈ H(x - θ) but with smooth gradients
+        l0_surrogate = torch.sigmoid(
+            (pre_acts - self.threshold) / self.bandwidth
+        ).sum(dim=-1).mean()
 
-        loss = l2_loss + l1_loss
+        # Actual L0 for logging (non-differentiable, uses hard threshold)
+        l0_actual = (pre_acts > self.threshold).float().sum(dim=-1).mean()
+
+        # Update coefficient if in dynamic mode (do this before computing loss)
+        self.update_l0_coeff(l0_actual)
+
+        # Sparsity loss (uses surrogate for gradient, but we report actual L0)
+        sparsity_loss = self.l0_coeff * l0_surrogate
+
+        loss = l2_loss + sparsity_loss
+
         num_dead_features = (
             self.num_batches_not_active > self.cfg["n_batches_to_dead"]
         ).sum()
@@ -337,9 +362,15 @@ class JumpReLUSAE(BaseAutoencoder):
             "feature_acts": acts,
             "num_dead_features": num_dead_features,
             "loss": loss,
-            "l1_loss": l1_loss,
+            "l0_loss": sparsity_loss,
+            "l0_coeff": self.l0_coeff,  # Log current coefficient
             "l2_loss": l2_loss,
-            "l0_norm": l0,
-            "l1_norm": l0,
+            "l0_norm": l0_actual,
+            # Backwards compat
+            "l1_loss": sparsity_loss,
+            "l1_norm": l0_actual,
         }
+        if self.target_l0 is not None:
+            output["target_l0"] = self.target_l0
+            output["l0_ema"] = self.l0_ema
         return output

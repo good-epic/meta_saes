@@ -1,0 +1,31 @@
+{
+  "joint": {
+    "loss": 0.0831693559885025,
+    "l0": 32.0,
+    "l2": 0.08047648519277573,
+    "decomp": 0.017832286655902863
+  },
+  "solo": {
+    "loss": 0.08339682221412659,
+    "l2": 0.08086986839771271,
+    "l1": 0.0,
+    "l0": 32.0,
+    "dead": 26
+  },
+  "sequential_meta": {
+    "loss": 0.5122674107551575,
+    "l2": 0.5122674107551575,
+    "l0": 4.0
+  },
+  "config": {
+    "lambda2": 0.01,
+    "sigma_sq": 0.1,
+    "dict_size": 12288,
+    "meta_dict_size": 2048,
+    "primary_sae_type": "batchtopk",
+    "meta_sae_type": "batchtopk",
+    "primary_top_k": 32,
+    "meta_top_k": 4,
+    "num_tokens": 100000000
+  }
+}

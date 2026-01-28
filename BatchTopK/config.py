@@ -33,8 +33,19 @@ def get_default_cfg():
         "top_k": 32,
         "top_k_aux": 512,
         "aux_penalty": (1/32),
-        # for jumprelu
-        "bandwidth": 0.001,
+
+        # JumpReLU specific
+        "bandwidth": 0.001,              # Sigmoid STE temperature (lower = sharper)
+        "jumprelu_init_threshold": 0.001,  # Initial threshold value per feature
+
+        # JumpReLU sparsity control (choose one mode):
+        # Fixed mode: set l0_coeff directly
+        # "l0_coeff": 0.01,
+
+        # Dynamic mode: set target_l0, coefficient adapts during training
+        # "target_l0": 64,              # Target average L0 sparsity
+        # "l0_coeff_start": 1e-5,       # Initial coefficient (start low)
+        # "l0_coeff_lr": 1e-4,          # Learning rate for coefficient updates
     }
     default_cfg = post_init_cfg(default_cfg)
     return default_cfg
