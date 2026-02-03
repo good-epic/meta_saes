@@ -4,14 +4,15 @@ Used to establish baseline variance for decoder comparison.
 """
 
 import argparse
+import json
 import random
+import sys
 import time
 from pathlib import Path
 
 import torch
 import numpy as np
 
-from BatchTopK.sae import BatchTopKSAE
 from BatchTopK.config import get_default_cfg
 from BatchTopK.activation_store import ActivationsStore
 from meta_sae_extension import get_sae_class, train_primary_sae_solo
@@ -84,6 +85,10 @@ def main():
     model = load_model_and_set_sizes(cfg)
     print(f"Model loaded. act_size={cfg['act_size']}")
 
+    # Store results for summary
+    all_results = []
+    total_start_time = time.time()
+
     # Train each independent SAE
     for run_idx in range(args.num_runs):
         # Generate random seed
@@ -92,6 +97,7 @@ def main():
         print(f"\n{'='*60}")
         print(f"RUN {run_idx + 1}/{args.num_runs} - Seed: {seed}")
         print(f"{'='*60}")
+        sys.stdout.flush()
 
         # Set seeds
         random.seed(seed)
@@ -103,19 +109,39 @@ def main():
         start_time = time.time()
 
         # Create fresh activation store (will use new random sampling)
+        print(f"Creating activation store...")
+        sys.stdout.flush()
         activation_store = ActivationsStore(model, cfg)
 
         # Create fresh SAE
+        print(f"Creating {cfg['sae_type']} SAE (dict_size={cfg['dict_size']})...")
+        sys.stdout.flush()
         sae_cls = get_sae_class(cfg["sae_type"])
         sae = sae_cls(cfg)
 
-        # Train
-        print(f"Training {cfg['sae_type']} SAE...")
+        # Train (train_primary_sae_solo has its own tqdm progress bar)
+        print(f"Starting training...")
+        sys.stdout.flush()
         metrics = train_primary_sae_solo(sae, activation_store, cfg)
 
         elapsed = time.time() - start_time
-        print(f"Training completed in {elapsed/60:.1f} minutes")
-        print(f"Final metrics: L2={metrics['l2']:.6f}, L0={metrics['l0']:.1f}")
+
+        # Store result
+        result = {
+            "run_idx": run_idx,
+            "seed": seed,
+            "l2": metrics["l2"],
+            "l0": metrics["l0"],
+            "dead": metrics.get("dead", 0),
+            "elapsed_min": elapsed / 60,
+        }
+        all_results.append(result)
+
+        print(f"\n[Run {run_idx + 1}/{args.num_runs}] Completed in {elapsed/60:.1f} min")
+        print(f"  L2: {metrics['l2']:.6f}")
+        print(f"  L0: {metrics['l0']:.1f}")
+        print(f"  Dead features: {metrics.get('dead', 'N/A')}")
+        sys.stdout.flush()
 
         # Save
         run_dir = output_dir / f"run_{run_idx:02d}_seed_{seed}"
@@ -129,16 +155,61 @@ def main():
             "run_idx": run_idx,
             "metrics": metrics,
         }, save_path)
-        print(f"Saved to {save_path}")
+        print(f"  Saved to: {save_path}")
+        sys.stdout.flush()
 
         # Cleanup
         del activation_store, sae
         torch.cuda.empty_cache()
 
+    total_elapsed = time.time() - total_start_time
+
+    # Print summary
     print(f"\n{'='*60}")
-    print(f"COMPLETED: {args.num_runs} independent SAE fits")
+    print(f"SUMMARY: {args.num_runs} Independent SAE Fits")
+    print(f"{'='*60}")
+    print(f"Total time: {total_elapsed/60:.1f} minutes")
+    print(f"\n{'Run':<6} {'Seed':<12} {'L2':<12} {'L0':<8} {'Dead':<8} {'Time(min)':<10}")
+    print("-" * 60)
+
+    l2_values = []
+    l0_values = []
+    for r in all_results:
+        print(f"{r['run_idx']:<6} {r['seed']:<12} {r['l2']:<12.6f} {r['l0']:<8.1f} {r['dead']:<8} {r['elapsed_min']:<10.1f}")
+        l2_values.append(r["l2"])
+        l0_values.append(r["l0"])
+
+    print("-" * 60)
+    print(f"{'Mean':<6} {'':<12} {np.mean(l2_values):<12.6f} {np.mean(l0_values):<8.1f}")
+    print(f"{'Std':<6} {'':<12} {np.std(l2_values):<12.6f} {np.std(l0_values):<8.1f}")
+    print(f"{'Min':<6} {'':<12} {np.min(l2_values):<12.6f} {np.min(l0_values):<8.1f}")
+    print(f"{'Max':<6} {'':<12} {np.max(l2_values):<12.6f} {np.max(l0_values):<8.1f}")
+    print(f"{'='*60}")
     print(f"Results saved to: {output_dir}")
     print(f"{'='*60}")
+
+    # Save summary JSON
+    summary = {
+        "num_runs": args.num_runs,
+        "total_time_min": total_elapsed / 60,
+        "config": {
+            "model_name": args.model_name,
+            "layer": args.layer,
+            "dict_size": args.dict_size,
+            "sae_type": args.sae_type,
+            "num_tokens": args.num_tokens,
+        },
+        "runs": all_results,
+        "stats": {
+            "l2_mean": float(np.mean(l2_values)),
+            "l2_std": float(np.std(l2_values)),
+            "l0_mean": float(np.mean(l0_values)),
+            "l0_std": float(np.std(l0_values)),
+        }
+    }
+    with open(output_dir / "summary.json", "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Summary saved to: {output_dir / 'summary.json'}")
 
 
 if __name__ == "__main__":
