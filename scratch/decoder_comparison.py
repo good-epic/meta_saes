@@ -1030,6 +1030,271 @@ if len(jumprelu_df) > 0 and len(batchtopk_df) > 0:
     combined_df.to_csv(OUTPUT_DIR / "combined_comparison.csv", index=False)
     print(f"  Saved combined_comparison.csv")
 
+# %%
+# =============================================================================
+# INDEPENDENT SAE BASELINE COMPARISON
+# =============================================================================
+# Compare independent SAE fits to establish baseline variance
+
+INDEPENDENT_SAE_DIR = Path(__file__).parent.parent / "outputs" / "independent_saes"
+
+print("\n" + "="*60)
+print("INDEPENDENT SAE BASELINE ANALYSIS")
+print("="*60)
+sys.stdout.flush()
+
+def load_independent_saes():
+    """Load all independent SAE runs."""
+    independent_saes = []
+
+    if not INDEPENDENT_SAE_DIR.exists():
+        print(f"Independent SAE directory not found: {INDEPENDENT_SAE_DIR}")
+        return []
+
+    run_dirs = sorted([d for d in INDEPENDENT_SAE_DIR.iterdir() if d.is_dir() and d.name.startswith("run_")])
+
+    for run_dir in tqdm(run_dirs, desc="Loading independent SAEs"):
+        sae_path = run_dir / "primary_sae.pt"
+        if sae_path.exists():
+            sae_data = torch.load(sae_path, map_location="cpu")
+            independent_saes.append({
+                "run_dir": run_dir,
+                "name": run_dir.name,
+                "decoder": sae_data["state_dict"]["W_dec"].numpy(),
+                "seed": sae_data.get("seed"),
+                "metrics": sae_data.get("metrics", {}),
+            })
+
+    return independent_saes
+
+def compute_pairwise_independent_metrics(independent_saes):
+    """Compute metrics for all pairs of independent SAEs."""
+    from itertools import combinations
+
+    n_saes = len(independent_saes)
+    n_pairs = n_saes * (n_saes - 1) // 2
+    print(f"Computing {n_pairs} pairwise comparisons for {n_saes} independent SAEs...")
+    sys.stdout.flush()
+
+    all_cosines = []
+    all_l2_dists = []
+
+    pairs = list(combinations(range(n_saes), 2))
+
+    for i, (idx1, idx2) in enumerate(tqdm(pairs, desc="Pairwise comparisons")):
+        sae1 = independent_saes[idx1]
+        sae2 = independent_saes[idx2]
+
+        # Compute matching metrics (reuse existing function)
+        metrics = compute_matching_metrics(
+            sae1["decoder"],
+            sae2["decoder"],
+            run_name=f"{sae1['name']} vs {sae2['name']}"
+        )
+
+        # Use Hungarian matching results
+        if "hungarian" in metrics:
+            all_cosines.extend(metrics["hungarian"]["cosine_similarities"])
+            all_l2_dists.extend(metrics["hungarian"]["l2_distances"])
+
+    return {
+        "cosine_similarities": np.array(all_cosines),
+        "l2_distances": np.array(all_l2_dists),
+        "n_pairs": n_pairs,
+        "n_saes": n_saes,
+    }
+
+# Load independent SAEs
+independent_saes = load_independent_saes()
+
+if len(independent_saes) >= 2:
+    print(f"Loaded {len(independent_saes)} independent SAEs")
+
+    # Compute pairwise metrics
+    independent_metrics = compute_pairwise_independent_metrics(independent_saes)
+
+    print(f"\nIndependent SAE Baseline Statistics:")
+    print(f"  Cosine similarity: mean={np.mean(independent_metrics['cosine_similarities']):.4f}, "
+          f"std={np.std(independent_metrics['cosine_similarities']):.4f}")
+    print(f"  L2 distance: mean={np.mean(independent_metrics['l2_distances']):.4f}, "
+          f"std={np.std(independent_metrics['l2_distances']):.4f}")
+    sys.stdout.flush()
+
+    # =========================================================================
+    # BASELINE HISTOGRAMS (Independent SAEs only)
+    # =========================================================================
+    print("\nGenerating baseline histograms...")
+    sys.stdout.flush()
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle(f"Independent SAE Baseline: {independent_metrics['n_pairs']} Pairwise Comparisons", fontsize=14)
+
+    # Cosine similarity histogram
+    ax = axes[0]
+    ax.hist(independent_metrics["cosine_similarities"], bins=50, density=True,
+            alpha=0.7, edgecolor='black', label='Independent pairs')
+    ax.axvline(x=0.9, color='r', linestyle='--', alpha=0.5, label='0.9')
+    ax.axvline(x=0.99, color='g', linestyle='--', alpha=0.5, label='0.99')
+    ax.set_xlabel("Cosine Similarity")
+    ax.set_ylabel("Density")
+    ax.set_title("Cosine Similarity Distribution")
+    ax.legend()
+
+    # L2 distance histogram
+    ax = axes[1]
+    ax.hist(independent_metrics["l2_distances"], bins=50, density=True,
+            alpha=0.7, edgecolor='black', label='Independent pairs')
+    ax.set_xlabel("L2 Distance")
+    ax.set_ylabel("Density")
+    ax.set_title("L2 Distance Distribution")
+    ax.legend()
+
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "independent_baseline_histograms.png", dpi=150)
+    plt.close()
+    print("  Saved independent_baseline_histograms.png")
+
+    # =========================================================================
+    # COMPARISON: Joint vs Solo vs Independent Baseline
+    # =========================================================================
+    print("\nGenerating comparison histograms...")
+    sys.stdout.flush()
+
+    # Aggregate joint vs solo cosines from JumpReLU runs (or BatchTopK if no JumpReLU)
+    if len(jumprelu_results) > 0:
+        comparison_results = jumprelu_results
+        comparison_name = "JumpReLU"
+    else:
+        comparison_results = batchtopk_results
+        comparison_name = "BatchTopK"
+
+    # Get all cosine similarities from joint vs solo comparisons
+    joint_vs_solo_cosines = []
+    joint_vs_solo_l2 = []
+    for r in comparison_results:
+        if "hungarian" in r["metrics"]:
+            joint_vs_solo_cosines.extend(r["metrics"]["hungarian"]["cosine_similarities"])
+            joint_vs_solo_l2.extend(r["metrics"]["hungarian"]["l2_distances"])
+
+    joint_vs_solo_cosines = np.array(joint_vs_solo_cosines)
+    joint_vs_solo_l2 = np.array(joint_vs_solo_l2)
+
+    # Define common bins
+    cosine_bins = np.linspace(0, 1, 51)
+    l2_max = max(np.percentile(joint_vs_solo_l2, 99), np.percentile(independent_metrics["l2_distances"], 99))
+    l2_bins = np.linspace(0, l2_max, 51)
+
+    # Side-by-side comparison
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f"Decoder Similarity: Joint vs Solo ({comparison_name}) vs Independent Baseline", fontsize=14)
+
+    # Top row: Overlaid histograms
+    ax = axes[0, 0]
+    ax.hist(joint_vs_solo_cosines, bins=cosine_bins, density=True, alpha=0.6,
+            label=f'Joint vs Solo ({comparison_name})', color='blue', edgecolor='blue')
+    ax.hist(independent_metrics["cosine_similarities"], bins=cosine_bins, density=True, alpha=0.6,
+            label='Independent vs Independent', color='orange', edgecolor='orange')
+    ax.axvline(x=0.9, color='r', linestyle='--', alpha=0.5)
+    ax.axvline(x=0.99, color='g', linestyle='--', alpha=0.5)
+    ax.set_xlabel("Cosine Similarity")
+    ax.set_ylabel("Density")
+    ax.set_title("Cosine Similarity: Overlaid Distributions")
+    ax.legend()
+
+    ax = axes[0, 1]
+    ax.hist(joint_vs_solo_l2, bins=l2_bins, density=True, alpha=0.6,
+            label=f'Joint vs Solo ({comparison_name})', color='blue', edgecolor='blue')
+    ax.hist(independent_metrics["l2_distances"], bins=l2_bins, density=True, alpha=0.6,
+            label='Independent vs Independent', color='orange', edgecolor='orange')
+    ax.set_xlabel("L2 Distance")
+    ax.set_ylabel("Density")
+    ax.set_title("L2 Distance: Overlaid Distributions")
+    ax.legend()
+
+    # Bottom row: Differential histograms
+    # Compute histogram values
+    joint_solo_cosine_hist, _ = np.histogram(joint_vs_solo_cosines, bins=cosine_bins, density=True)
+    independent_cosine_hist, _ = np.histogram(independent_metrics["cosine_similarities"], bins=cosine_bins, density=True)
+    cosine_diff = joint_solo_cosine_hist - independent_cosine_hist
+    cosine_bin_centers = (cosine_bins[:-1] + cosine_bins[1:]) / 2
+
+    ax = axes[1, 0]
+    colors = ['green' if d > 0 else 'red' for d in cosine_diff]
+    ax.bar(cosine_bin_centers, cosine_diff, width=cosine_bins[1]-cosine_bins[0],
+           color=colors, alpha=0.7, edgecolor='black', linewidth=0.5)
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=1)
+    ax.axvline(x=0.9, color='gray', linestyle='--', alpha=0.5)
+    ax.axvline(x=0.99, color='gray', linestyle='--', alpha=0.5)
+    ax.set_xlabel("Cosine Similarity")
+    ax.set_ylabel("Density Difference")
+    ax.set_title("Differential: (Joint vs Solo) - (Independent vs Independent)\nGreen = more joint/solo pairs, Red = more independent pairs")
+
+    joint_solo_l2_hist, _ = np.histogram(joint_vs_solo_l2, bins=l2_bins, density=True)
+    independent_l2_hist, _ = np.histogram(independent_metrics["l2_distances"], bins=l2_bins, density=True)
+    l2_diff = joint_solo_l2_hist - independent_l2_hist
+    l2_bin_centers = (l2_bins[:-1] + l2_bins[1:]) / 2
+
+    ax = axes[1, 1]
+    colors = ['green' if d > 0 else 'red' for d in l2_diff]
+    ax.bar(l2_bin_centers, l2_diff, width=l2_bins[1]-l2_bins[0],
+           color=colors, alpha=0.7, edgecolor='black', linewidth=0.5)
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=1)
+    ax.set_xlabel("L2 Distance")
+    ax.set_ylabel("Density Difference")
+    ax.set_title("Differential: (Joint vs Solo) - (Independent vs Independent)\nGreen = more joint/solo pairs, Red = more independent pairs")
+
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "joint_vs_solo_vs_independent_comparison.png", dpi=150)
+    plt.close()
+    print("  Saved joint_vs_solo_vs_independent_comparison.png")
+
+    # Print interpretation
+    print("\n" + "="*60)
+    print("INTERPRETATION")
+    print("="*60)
+
+    # Compare means
+    joint_solo_cosine_mean = np.mean(joint_vs_solo_cosines)
+    independent_cosine_mean = np.mean(independent_metrics["cosine_similarities"])
+
+    print(f"\nCosine Similarity:")
+    print(f"  Joint vs Solo mean:        {joint_solo_cosine_mean:.4f}")
+    print(f"  Independent vs Indep mean: {independent_cosine_mean:.4f}")
+    print(f"  Difference:                {joint_solo_cosine_mean - independent_cosine_mean:+.4f}")
+
+    if joint_solo_cosine_mean > independent_cosine_mean:
+        print("  → Joint/Solo decoders are MORE similar than independent fits")
+        print("    (Joint training preserves decoder structure)")
+    else:
+        print("  → Joint/Solo decoders are LESS similar than independent fits")
+        print("    (Joint training changes decoder more than random variation)")
+
+    joint_solo_l2_mean = np.mean(joint_vs_solo_l2)
+    independent_l2_mean = np.mean(independent_metrics["l2_distances"])
+
+    print(f"\nL2 Distance:")
+    print(f"  Joint vs Solo mean:        {joint_solo_l2_mean:.4f}")
+    print(f"  Independent vs Indep mean: {independent_l2_mean:.4f}")
+    print(f"  Difference:                {joint_solo_l2_mean - independent_l2_mean:+.4f}")
+
+    if joint_solo_l2_mean < independent_l2_mean:
+        print("  → Joint/Solo decoders are MORE similar than independent fits")
+    else:
+        print("  → Joint/Solo decoders are LESS similar than independent fits")
+
+    # Fraction above thresholds
+    joint_solo_frac_99 = np.mean(joint_vs_solo_cosines >= 0.99)
+    independent_frac_99 = np.mean(independent_metrics["cosine_similarities"] >= 0.99)
+
+    print(f"\nFraction with cosine >= 0.99:")
+    print(f"  Joint vs Solo:        {joint_solo_frac_99:.4f} ({joint_solo_frac_99*100:.1f}%)")
+    print(f"  Independent vs Indep: {independent_frac_99:.4f} ({independent_frac_99*100:.1f}%)")
+
+    sys.stdout.flush()
+
+else:
+    print(f"Need at least 2 independent SAEs for comparison, found {len(independent_saes)}")
+
 print("\n" + "="*60)
 print("DECODER COMPARISON COMPLETE")
 print(f"All outputs saved to: {OUTPUT_DIR}")

@@ -89,26 +89,33 @@ def main():
     all_results = []
     total_start_time = time.time()
 
+    # Track cumulative documents to skip (so each run uses fresh data)
+    cumulative_documents = 0
+
     # Train each independent SAE
     for run_idx in range(args.num_runs):
-        # Generate random seed
+        # Generate random seed (for model init, not data)
         seed = random.randint(0, 2**32 - 1)
 
         print(f"\n{'='*60}")
         print(f"RUN {run_idx + 1}/{args.num_runs} - Seed: {seed}")
+        print(f"Skipping {cumulative_documents:,} documents (previously used)")
         print(f"{'='*60}")
         sys.stdout.flush()
 
-        # Set seeds
+        # Set seeds for model initialization
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
+        # Skip documents already used by previous runs
+        cfg["skip_documents"] = cumulative_documents
+
         start_time = time.time()
 
-        # Create fresh activation store (will use new random sampling)
+        # Create fresh activation store (will skip previously used documents)
         print(f"Creating activation store...")
         sys.stdout.flush()
         activation_store = ActivationsStore(model, cfg)
@@ -126,6 +133,10 @@ def main():
 
         elapsed = time.time() - start_time
 
+        # Track documents used in this run
+        docs_this_run = activation_store.documents_processed - cumulative_documents
+        cumulative_documents = activation_store.documents_processed
+
         # Store result
         result = {
             "run_idx": run_idx,
@@ -134,6 +145,8 @@ def main():
             "l0": metrics["l0"],
             "dead": metrics.get("dead", 0),
             "elapsed_min": elapsed / 60,
+            "documents_used": docs_this_run,
+            "documents_cumulative": cumulative_documents,
         }
         all_results.append(result)
 
@@ -141,6 +154,7 @@ def main():
         print(f"  L2: {metrics['l2']:.6f}")
         print(f"  L0: {metrics['l0']:.1f}")
         print(f"  Dead features: {metrics.get('dead', 'N/A')}")
+        print(f"  Documents used: {docs_this_run:,} (cumulative: {cumulative_documents:,})")
         sys.stdout.flush()
 
         # Save
@@ -169,24 +183,25 @@ def main():
     print(f"SUMMARY: {args.num_runs} Independent SAE Fits")
     print(f"{'='*60}")
     print(f"Total time: {total_elapsed/60:.1f} minutes")
-    print(f"\n{'Run':<6} {'Seed':<12} {'L2':<12} {'L0':<8} {'Dead':<8} {'Time(min)':<10}")
-    print("-" * 60)
+    print(f"Total documents used: {cumulative_documents:,}")
+    print(f"\n{'Run':<6} {'Seed':<12} {'L2':<12} {'L0':<8} {'Dead':<8} {'Docs':<12} {'Time(min)':<10}")
+    print("-" * 70)
 
     l2_values = []
     l0_values = []
     for r in all_results:
-        print(f"{r['run_idx']:<6} {r['seed']:<12} {r['l2']:<12.6f} {r['l0']:<8.1f} {r['dead']:<8} {r['elapsed_min']:<10.1f}")
+        print(f"{r['run_idx']:<6} {r['seed']:<12} {r['l2']:<12.6f} {r['l0']:<8.1f} {r['dead']:<8} {r['documents_used']:<12,} {r['elapsed_min']:<10.1f}")
         l2_values.append(r["l2"])
         l0_values.append(r["l0"])
 
-    print("-" * 60)
+    print("-" * 70)
     print(f"{'Mean':<6} {'':<12} {np.mean(l2_values):<12.6f} {np.mean(l0_values):<8.1f}")
     print(f"{'Std':<6} {'':<12} {np.std(l2_values):<12.6f} {np.std(l0_values):<8.1f}")
     print(f"{'Min':<6} {'':<12} {np.min(l2_values):<12.6f} {np.min(l0_values):<8.1f}")
     print(f"{'Max':<6} {'':<12} {np.max(l2_values):<12.6f} {np.max(l0_values):<8.1f}")
-    print(f"{'='*60}")
+    print(f"{'='*70}")
     print(f"Results saved to: {output_dir}")
-    print(f"{'='*60}")
+    print(f"{'='*70}")
 
     # Save summary JSON
     summary = {

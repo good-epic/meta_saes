@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
@@ -18,24 +19,47 @@ class ActivationsStore:
         dataset_path = cfg["dataset_path"]
         dataset_name = cfg.get("dataset_name", None)  # Optional subset/config name
 
-        if dataset_path in ["wikitext-2-raw-v1", "wikitext-2-v1", "wikitext-103-raw-v1", "wikitext-103-v1"]:
-            # These are wikitext configs, load with config name
-            self.dataset = iter(load_dataset("wikitext", dataset_path, split="train", streaming=True))
-        elif dataset_name is not None:
-            # Dataset with a named subset (e.g., FineWeb sample-10BT)
-            self.dataset = iter(load_dataset(dataset_path, name=dataset_name, split="train", streaming=True))
-        else:
-            # Regular dataset without config
-            self.dataset = iter(load_dataset(dataset_path, split="train", streaming=True))
-            
+        self.dataset = self._load_dataset(dataset_path, dataset_name)
+
         self.hook_point = cfg["hook_point"]
         self.context_size = min(cfg["seq_len"], model.cfg.n_ctx)
         self.model_batch_size = cfg["model_batch_size"]
         self.device = cfg["device"]
         self.num_batches_in_buffer = cfg["num_batches_in_buffer"]
-        self.tokens_column = self._get_tokens_column()
         self.cfg = cfg
         self.tokenizer = model.tokenizer
+
+        # Track documents processed (for reporting)
+        self.documents_processed = 0
+
+        # Skip documents if requested (for independent runs using different data)
+        skip_documents = cfg.get("skip_documents", 0)
+        if skip_documents > 0:
+            print(f"   Skipping {skip_documents:,} documents...", flush=True)
+            log_every = max(10000, skip_documents // 20)  # Log ~20 times, min every 10k
+            for i in range(skip_documents):
+                try:
+                    next(self.dataset)
+                except StopIteration:
+                    print(f"   Dataset exhausted after skipping {i:,} documents", flush=True)
+                    break
+                if (i + 1) % log_every == 0:
+                    print(f"   Skipped {i + 1:,} / {skip_documents:,} documents...", flush=True)
+            print(f"   Done skipping {skip_documents:,} documents", flush=True)
+            self.documents_processed = skip_documents
+
+        self.tokens_column = self._get_tokens_column()
+
+    def _load_dataset(self, dataset_path, dataset_name):
+        """Load the streaming dataset."""
+        if dataset_path in ["wikitext-2-raw-v1", "wikitext-2-v1", "wikitext-103-raw-v1", "wikitext-103-v1"]:
+            ds = load_dataset("wikitext", dataset_path, split="train", streaming=True)
+        elif dataset_name is not None:
+            ds = load_dataset(dataset_path, name=dataset_name, split="train", streaming=True)
+        else:
+            ds = load_dataset(dataset_path, split="train", streaming=True)
+
+        return iter(ds)
 
     def _get_tokens_column(self):
         sample = next(self.dataset)
@@ -59,13 +83,11 @@ class ActivationsStore:
                 print("   Dataset exhausted, restarting...")
                 dataset_path = self.cfg["dataset_path"]
                 dataset_name = self.cfg.get("dataset_name", None)
-                if dataset_path in ["wikitext-2-raw-v1", "wikitext-2-v1", "wikitext-103-raw-v1", "wikitext-103-v1"]:
-                    self.dataset = iter(load_dataset("wikitext", dataset_path, split="train", streaming=True))
-                elif dataset_name is not None:
-                    self.dataset = iter(load_dataset(dataset_path, name=dataset_name, split="train", streaming=True))
-                else:
-                    self.dataset = iter(load_dataset(dataset_path, split="train", streaming=True))
+                self.dataset = self._load_dataset(dataset_path, dataset_name)
                 batch = next(self.dataset)
+
+            # Track documents processed
+            self.documents_processed += 1
 
             if self.tokens_column == "text":
                 # Tokenize text - this returns a GPU tensor
