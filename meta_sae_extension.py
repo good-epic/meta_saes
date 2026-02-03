@@ -354,7 +354,7 @@ def train_sae_with_meta(
     # Log frequency - reduce .item() calls which cause CPU-GPU sync
     log_freq = 50
     # Stdout print frequency (less frequent to avoid spam)
-    print_freq = 500
+    print_freq = 200
 
     # Track final metrics
     final_metrics = {}
@@ -474,7 +474,7 @@ def train_primary_sae_solo(primary_sae, activation_store, cfg, logger: Optional[
     # Log frequency - reduce .item() calls which cause CPU-GPU sync
     log_freq = 50
     # Stdout print frequency
-    print_freq = 500
+    print_freq = 200
 
     # Track final metrics
     final_metrics = {}
@@ -586,7 +586,7 @@ def train_meta_sae_on_frozen_primary(meta_sae, primary_sae, meta_cfg, penalty_cf
     # Log frequency - reduce .item() calls which cause CPU-GPU sync
     log_freq = 50
     # Stdout print frequency
-    print_freq = 500
+    print_freq = 200
 
     # Track final metrics
     final_metrics = {}
