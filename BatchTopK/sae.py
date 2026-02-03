@@ -272,43 +272,81 @@ class JumpReLUSAE(BaseAutoencoder):
         if self.target_l0 is not None:
             # Dynamic mode: start with low coefficient, adapt during training
             self.l0_coeff = cfg.get("l0_coeff_start", 1e-5)
-            self.l0_coeff_lr = cfg.get("l0_coeff_lr", 1e-4)
-            # Track running average of L0 for smoother updates
+
+            # PD controller gains
+            self.l0_Kp = cfg.get("l0_Kp", 0.001)  # Proportional gain
+            self.l0_Kd = cfg.get("l0_Kd", 0.01)   # Derivative gain
+
+            # Asymmetric multiplier when below target (more aggressive recovery)
+            self.l0_below_target_multiplier = cfg.get("l0_below_target_multiplier", 2.0)
+
+            # Burn-in period with reduced gains
+            self.l0_burnin_steps = cfg.get("l0_burnin_steps", 1000)
+            self.l0_burnin_multiplier = cfg.get("l0_burnin_multiplier", 0.5)
+
+            # Track running average of L0 and previous value for derivative
             self.l0_ema = None
+            self.l0_ema_prev = None
             self.l0_ema_decay = 0.99
+            self.l0_update_steps = 0
         else:
             # Fixed mode: use l0_coeff directly (fall back to l1_coeff for backwards compat)
             self.l0_coeff = cfg.get("l0_coeff", cfg.get("l1_coeff", 0.0))
 
     def update_l0_coeff(self, current_l0):
         """
-        Update sparsity coefficient to move toward target L0.
-        Called after each forward pass in dynamic mode.
+        Update sparsity coefficient to move toward target L0 using PD control.
 
-        Uses proportional control: if L0 > target, increase coefficient to encourage
-        more sparsity. If L0 < target, decrease coefficient.
+        Uses Proportional-Derivative control:
+        - P term: responds to how far we are from target
+        - D term: responds to rate of change (prevents overshoot)
+
+        Also applies:
+        - Asymmetric gains: more aggressive when below target (harder to recover)
+        - Burn-in period: gentler adjustments early to avoid killing features
         """
         if self.target_l0 is None:
             return  # Fixed mode, no update
 
-        # Update EMA of L0 for smoother coefficient updates
+        self.l0_update_steps += 1
+
+        # Update EMA of L0 for smoother control
         current_l0_val = current_l0.item() if torch.is_tensor(current_l0) else current_l0
         if self.l0_ema is None:
             self.l0_ema = current_l0_val
-        else:
-            self.l0_ema = self.l0_ema_decay * self.l0_ema + (1 - self.l0_ema_decay) * current_l0_val
+            self.l0_ema_prev = current_l0_val
+            return  # Need at least 2 samples for derivative
 
-        # Proportional control: error = current - target
-        # Positive error (too many features) -> increase coefficient
-        # Negative error (too few features) -> decrease coefficient
+        # Store previous before updating
+        self.l0_ema_prev = self.l0_ema
+        self.l0_ema = self.l0_ema_decay * self.l0_ema + (1 - self.l0_ema_decay) * current_l0_val
+
+        # PD Control terms
+        # Error: positive = above target (too many features), negative = below target
         error = self.l0_ema - self.target_l0
 
-        # Update coefficient (multiplicative for stability across scales)
-        # Use tanh to bound the update magnitude
-        update_factor = 1.0 + self.l0_coeff_lr * (error / max(self.target_l0, 1.0))
-        update_factor = max(0.9, min(1.1, update_factor))  # Clamp to avoid instability
+        # Derivative: positive = L0 increasing, negative = L0 decreasing
+        derivative = self.l0_ema - self.l0_ema_prev
 
-        self.l0_coeff = self.l0_coeff * update_factor
+        # Normalize by target for scale-invariance
+        error_normalized = error / max(self.target_l0, 1.0)
+        derivative_normalized = derivative / max(self.target_l0, 1.0)
+
+        # PD adjustment
+        adjustment = self.l0_Kp * error_normalized + self.l0_Kd * derivative_normalized
+
+        # Asymmetric: more aggressive when below target (recovery is harder)
+        if error < 0:
+            adjustment *= self.l0_below_target_multiplier
+
+        # Burn-in: gentler early on to avoid killing features
+        if self.l0_update_steps < self.l0_burnin_steps:
+            adjustment *= self.l0_burnin_multiplier
+
+        # Apply adjustment (multiplicative for stability across scales)
+        # Clamp adjustment to avoid extreme changes
+        adjustment = max(-0.1, min(0.1, adjustment))
+        self.l0_coeff *= (1 + adjustment)
 
         # Clamp coefficient to reasonable range
         self.l0_coeff = max(1e-8, min(1.0, self.l0_coeff))

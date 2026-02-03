@@ -59,13 +59,21 @@ def build_common_arg_parser(description: str = "Common Arg Parser") -> argparse.
     parser.add_argument("--l0_coeff", type=float, default=None,
                         help="Fixed L0 sparsity coefficient (if set, uses fixed mode)")
 
-    # Dynamic mode: coefficient adapts to achieve target_l0
+    # Dynamic mode: coefficient adapts to achieve target_l0 using PD control
     parser.add_argument("--target_l0", type=int, default=None,
                         help="Target L0 sparsity for dynamic coefficient adaptation")
     parser.add_argument("--l0_coeff_start", type=float, default=1e-5,
                         help="Initial L0 coefficient for dynamic mode (default: 1e-5)")
-    parser.add_argument("--l0_coeff_lr", type=float, default=1e-4,
-                        help="Learning rate for L0 coefficient updates (default: 1e-4)")
+    parser.add_argument("--l0_Kp", type=float, default=0.001,
+                        help="Proportional gain for L0 PD controller (default: 0.001)")
+    parser.add_argument("--l0_Kd", type=float, default=0.01,
+                        help="Derivative gain for L0 PD controller (default: 0.01)")
+    parser.add_argument("--l0_below_target_multiplier", type=float, default=2.0,
+                        help="Multiplier for adjustment when L0 below target (default: 2.0)")
+    parser.add_argument("--l0_burnin_steps", type=int, default=1000,
+                        help="Steps with reduced gains at start of training (default: 1000)")
+    parser.add_argument("--l0_burnin_multiplier", type=float, default=0.5,
+                        help="Gain multiplier during burn-in period (default: 0.5)")
 
     # Training hyperparameters (for training script)
     parser.add_argument("--num_tokens", type=int, default=100000000, help="Number of tokens to process during training")
