@@ -270,86 +270,83 @@ class JumpReLUSAE(BaseAutoencoder):
         # Sparsity coefficient setup
         self.target_l0 = cfg.get("target_l0", None)
         if self.target_l0 is not None:
-            # Dynamic mode: start with low coefficient, adapt during training
+            # Dynamic mode: start with low coefficient, adapt after stabilization
             self.l0_coeff = cfg.get("l0_coeff_start", 1e-5)
 
-            # PD controller gains
-            self.l0_Kp = cfg.get("l0_Kp", 0.001)  # Proportional gain
-            self.l0_Kd = cfg.get("l0_Kd", 0.01)   # Derivative gain
+            # Stabilization detection
+            self.l0_stability_threshold = cfg.get("l0_stability_threshold", 0.02)  # 2% change = stable
+            self.l0_stability_window = cfg.get("l0_stability_window", 500)  # steps to check stability
+            self.l0_adjustment_factor = cfg.get("l0_adjustment_factor", 0.1)  # how much to adjust when stable
 
-            # Asymmetric multiplier when below target (more aggressive recovery)
-            self.l0_below_target_multiplier = cfg.get("l0_below_target_multiplier", 2.0)
-
-            # Burn-in period with reduced gains
-            self.l0_burnin_steps = cfg.get("l0_burnin_steps", 1000)
-            self.l0_burnin_multiplier = cfg.get("l0_burnin_multiplier", 0.5)
-
-            # Track running average of L0 and previous value for derivative
+            # Track L0 history for stability detection
             self.l0_ema = None
-            self.l0_ema_prev = None
             self.l0_ema_decay = 0.99
+            self.l0_history = []  # recent L0 values for stability check
             self.l0_update_steps = 0
+            self.l0_is_stable = False
+            self.l0_last_adjustment_step = 0
         else:
             # Fixed mode: use l0_coeff directly (fall back to l1_coeff for backwards compat)
             self.l0_coeff = cfg.get("l0_coeff", cfg.get("l1_coeff", 0.0))
 
     def update_l0_coeff(self, current_l0):
         """
-        Update sparsity coefficient to move toward target L0 using PD control.
+        Update sparsity coefficient to move toward target L0.
 
-        Uses Proportional-Derivative control:
-        - P term: responds to how far we are from target
-        - D term: responds to rate of change (prevents overshoot)
-
-        Also applies:
-        - Asymmetric gains: more aggressive when below target (harder to recover)
-        - Burn-in period: gentler adjustments early to avoid killing features
+        Strategy: Wait for L0 to stabilize, then adjust coefficient based on
+        where it settled relative to target. This avoids chasing a moving target
+        during the volatile early training phase.
         """
         if self.target_l0 is None:
             return  # Fixed mode, no update
 
         self.l0_update_steps += 1
 
-        # Update EMA of L0 for smoother control
+        # Update EMA of L0
         current_l0_val = current_l0.item() if torch.is_tensor(current_l0) else current_l0
         if self.l0_ema is None:
             self.l0_ema = current_l0_val
-            self.l0_ema_prev = current_l0_val
-            return  # Need at least 2 samples for derivative
 
-        # Store previous before updating
-        self.l0_ema_prev = self.l0_ema
         self.l0_ema = self.l0_ema_decay * self.l0_ema + (1 - self.l0_ema_decay) * current_l0_val
 
-        # PD Control terms
-        # Error: positive = above target (too many features), negative = below target
-        error = self.l0_ema - self.target_l0
+        # Track history for stability detection
+        self.l0_history.append(self.l0_ema)
+        if len(self.l0_history) > self.l0_stability_window:
+            self.l0_history.pop(0)
 
-        # Derivative: positive = L0 increasing, negative = L0 decreasing
-        derivative = self.l0_ema - self.l0_ema_prev
+        # Don't check stability until we have enough history
+        if len(self.l0_history) < self.l0_stability_window:
+            return
 
-        # Normalize by target for scale-invariance
-        error_normalized = error / max(self.target_l0, 1.0)
-        derivative_normalized = derivative / max(self.target_l0, 1.0)
+        # Check if L0 has stabilized (small relative change over window)
+        window_start = self.l0_history[0]
+        window_end = self.l0_history[-1]
+        relative_change = abs(window_end - window_start) / max(window_start, 1.0)
 
-        # PD adjustment
-        adjustment = self.l0_Kp * error_normalized + self.l0_Kd * derivative_normalized
+        self.l0_is_stable = relative_change < self.l0_stability_threshold
 
-        # Asymmetric: more aggressive when below target (recovery is harder)
-        if error < 0:
-            adjustment *= self.l0_below_target_multiplier
+        # Only adjust coefficient when stable and enough steps since last adjustment
+        min_steps_between_adjustments = self.l0_stability_window
+        steps_since_adjustment = self.l0_update_steps - self.l0_last_adjustment_step
 
-        # Burn-in: gentler early on to avoid killing features
-        if self.l0_update_steps < self.l0_burnin_steps:
-            adjustment *= self.l0_burnin_multiplier
+        if self.l0_is_stable and steps_since_adjustment >= min_steps_between_adjustments:
+            # Calculate error from target
+            error = self.l0_ema - self.target_l0
+            relative_error = error / self.target_l0
 
-        # Apply adjustment (multiplicative for stability across scales)
-        # Clamp adjustment to avoid extreme changes
-        adjustment = max(-0.1, min(0.1, adjustment))
-        self.l0_coeff *= (1 + adjustment)
+            # Adjust coefficient proportionally to error
+            # Positive error (L0 too high) -> increase coefficient
+            # Negative error (L0 too low) -> decrease coefficient
+            adjustment = self.l0_adjustment_factor * relative_error
+            adjustment = max(-0.5, min(0.5, adjustment))  # Cap at 50% change
 
-        # Clamp coefficient to reasonable range
-        self.l0_coeff = max(1e-8, min(1.0, self.l0_coeff))
+            self.l0_coeff *= (1 + adjustment)
+            self.l0_coeff = max(1e-8, min(1.0, self.l0_coeff))
+
+            self.l0_last_adjustment_step = self.l0_update_steps
+
+            # Clear history to re-check stability after adjustment
+            self.l0_history.clear()
 
     def forward(self, x, use_pre_enc_bias=False):
         x, x_mean, x_std = self.preprocess_input(x)
