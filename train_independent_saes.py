@@ -44,13 +44,11 @@ def main():
     parser.add_argument("--bandwidth", type=float, default=0.001)
     parser.add_argument("--jumprelu_init_threshold", type=float, default=0.001)
 
-    # PD controller for L0 targeting
+    # L0 coefficient control (wait-for-stability approach)
     parser.add_argument("--l0_coeff_start", type=float, default=1e-5)
-    parser.add_argument("--l0_Kp", type=float, default=0.001, help="Proportional gain")
-    parser.add_argument("--l0_Kd", type=float, default=0.01, help="Derivative gain")
-    parser.add_argument("--l0_below_target_multiplier", type=float, default=2.0)
-    parser.add_argument("--l0_burnin_steps", type=int, default=1000)
-    parser.add_argument("--l0_burnin_multiplier", type=float, default=0.5)
+    parser.add_argument("--l0_stability_threshold", type=float, default=0.02, help="Relative change below this = stable")
+    parser.add_argument("--l0_stability_window", type=int, default=500, help="Steps to check stability over")
+    parser.add_argument("--l0_adjustment_factor", type=float, default=0.1, help="How much to adjust when stable")
 
     args = parser.parse_args()
 
@@ -86,13 +84,11 @@ def main():
         "jumprelu_init_threshold": args.jumprelu_init_threshold,
         "dataset_path": "HuggingFaceFW/fineweb",
         "dataset_name": "sample-10BT",
-        # PD controller params
+        # L0 coefficient control params
         "l0_coeff_start": args.l0_coeff_start,
-        "l0_Kp": args.l0_Kp,
-        "l0_Kd": args.l0_Kd,
-        "l0_below_target_multiplier": args.l0_below_target_multiplier,
-        "l0_burnin_steps": args.l0_burnin_steps,
-        "l0_burnin_multiplier": args.l0_burnin_multiplier,
+        "l0_stability_threshold": args.l0_stability_threshold,
+        "l0_stability_window": args.l0_stability_window,
+        "l0_adjustment_factor": args.l0_adjustment_factor,
     })
 
     # Load model once (reuse across runs)
