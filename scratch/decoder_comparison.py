@@ -7,6 +7,7 @@
 
 import sys
 import os
+import time
 
 # Non-interactive backend for script execution
 if not hasattr(sys, 'ps1'):
@@ -20,13 +21,14 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 from collections import defaultdict
+from tqdm import tqdm
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 PRINT_TEXT = True  # Set to True to print detailed text readouts
-GRID_SEARCH_DIR = Path(__file__).parent.parent / "outputs" / "grid_search_20260116_212533"
-OUTPUT_DIR = Path(__file__).parent / "decoder_comparison_outputs"
+GRID_SEARCH_DIR = Path(__file__).parent.parent / "outputs" / "grid_search_20260128_223720"
+OUTPUT_DIR = GRID_SEARCH_DIR / "decoder_comparison_outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # GPU settings
@@ -63,18 +65,21 @@ def load_run_data(run_dir):
     }
 
 # Load all runs
-all_runs = []
-for run_dir in GRID_SEARCH_DIR.iterdir():
-    if run_dir.is_dir():
-        data = load_run_data(run_dir)
-        if data is not None:
-            all_runs.append(data)
+print(f"\nScanning {GRID_SEARCH_DIR}...")
+sys.stdout.flush()
 
-if PRINT_TEXT:
-    print(f"Loaded {len(all_runs)} valid runs")
-    print(f"Using device: {DEVICE}")
-    print(f"Hungarian matching: {RUN_HUNGARIAN}")
-    sys.stdout.flush()
+run_dirs = [d for d in GRID_SEARCH_DIR.iterdir() if d.is_dir()]
+all_runs = []
+
+for run_dir in tqdm(run_dirs, desc="Loading runs", unit="run"):
+    data = load_run_data(run_dir)
+    if data is not None:
+        all_runs.append(data)
+
+print(f"\nLoaded {len(all_runs)} valid runs from {len(run_dirs)} directories")
+print(f"Using device: {DEVICE}")
+print(f"Hungarian matching: {RUN_HUNGARIAN}")
+sys.stdout.flush()
 
 # Filter to same-architecture runs
 jumprelu_runs = [r for r in all_runs
@@ -144,7 +149,7 @@ def closest_match_B_to_A(sim_matrix):
 # METRICS COMPUTATION (GPU-ACCELERATED)
 # =============================================================================
 
-def compute_matching_metrics(solo_decoder_np, joint_decoder_np, device=DEVICE):
+def compute_matching_metrics(solo_decoder_np, joint_decoder_np, device=DEVICE, run_name=""):
     """
     Compute all metrics for comparing solo vs joint decoder matrices.
 
@@ -152,17 +157,26 @@ def compute_matching_metrics(solo_decoder_np, joint_decoder_np, device=DEVICE):
         solo_decoder_np: (num_features, hidden_dim) decoder matrix from solo SAE (numpy)
         joint_decoder_np: (num_features, hidden_dim) decoder matrix from joint SAE (numpy)
         device: torch device to use
+        run_name: name of run for progress display
 
     Returns:
         dict with all metrics for each matching method
     """
     # Move to GPU
+    print(f"    Moving to {device}...", end=" ")
+    sys.stdout.flush()
     solo_decoder = torch.from_numpy(solo_decoder_np).float().to(device)
     joint_decoder = torch.from_numpy(joint_decoder_np).float().to(device)
+    print("done")
+    sys.stdout.flush()
 
     # Compute similarity and distance matrices on GPU
+    print(f"    Computing similarity matrix ({solo_decoder.shape[0]}x{joint_decoder.shape[0]})...", end=" ")
+    sys.stdout.flush()
     sim_matrix = cosine_similarity_matrix_gpu(solo_decoder, joint_decoder)
     dist_matrix = l2_distance_matrix_gpu(solo_decoder, joint_decoder)
+    print("done")
+    sys.stdout.flush()
 
     # Compute norms
     solo_norms = torch.norm(solo_decoder, dim=1)
@@ -172,8 +186,13 @@ def compute_matching_metrics(solo_decoder_np, joint_decoder_np, device=DEVICE):
 
     # === Hungarian Matching (1:1) ===
     if RUN_HUNGARIAN:
+        print(f"    Running Hungarian matching (lapjv)...", end=" ")
+        sys.stdout.flush()
+        start_hung = time.time()
         sim_np = sim_matrix.cpu().numpy()
         hung_row_idx, hung_col_idx = hungarian_matching(sim_np)
+        hung_time = time.time() - start_hung
+        print(f"done ({hung_time:.1f}s)")
 
         hung_cosines = sim_np[hung_row_idx, hung_col_idx]
         hung_l2_dists = dist_matrix[hung_row_idx, hung_col_idx].cpu().numpy()
@@ -281,21 +300,36 @@ def process_runs(runs, arch_name):
     """Process all runs for a given architecture and return aggregated results."""
     all_results = []
 
+    print(f"\n{'='*60}")
+    print(f"Processing {len(runs)} {arch_name} runs")
+    print(f"{'='*60}")
+    sys.stdout.flush()
+
     for i, run in enumerate(runs):
-        if PRINT_TEXT:
-            print(f"Processing {arch_name} run {i+1}/{len(runs)}: {run['run_dir'].name}")
-            sys.stdout.flush()
+        run_name = run['run_dir'].name
+        start_time = time.time()
+
+        print(f"\n[{i+1}/{len(runs)}] Starting: {run_name}")
+        sys.stdout.flush()
 
         # Load SAE state dicts
+        print(f"  Loading SAE files...", end=" ")
+        sys.stdout.flush()
         joint_sae = torch.load(run["run_dir"] / "joint_primary_sae.pt", map_location="cpu")
         solo_sae = torch.load(run["run_dir"] / "solo_primary_sae.pt", map_location="cpu")
+        print("done")
+        sys.stdout.flush()
 
         # Extract decoder matrices
         joint_decoder = joint_sae["state_dict"]["W_dec"].numpy()
         solo_decoder = solo_sae["state_dict"]["W_dec"].numpy()
+        print(f"  Decoder shape: {solo_decoder.shape}")
+        sys.stdout.flush()
 
-        # Compute matching metrics
-        metrics = compute_matching_metrics(solo_decoder, joint_decoder)
+        # Compute matching metrics (includes Hungarian matching)
+        print(f"  Computing matching metrics...")
+        sys.stdout.flush()
+        metrics = compute_matching_metrics(solo_decoder, joint_decoder, run_name=run_name)
 
         # Compute dead feature overlap
         dead_overlap = compute_dead_feature_overlap(solo_sae, joint_sae)
@@ -312,25 +346,25 @@ def process_runs(runs, arch_name):
             "joint_l2": run["metrics"]["joint"]["l2"],
             "solo_l2": run["metrics"]["solo"]["l2"],
             "joint_decomp": run["metrics"]["joint"]["decomp"],
+            "joint_l0": run["metrics"]["joint"]["l0"],
+            "solo_l0": run["metrics"]["solo"]["l0"],
         }
 
         all_results.append(result)
 
+        elapsed = time.time() - start_time
+        print(f"[{i+1}/{len(runs)}] Completed: {run_name} ({elapsed:.1f}s)")
+        sys.stdout.flush()
+
+    print(f"\n{'='*60}")
+    print(f"Finished processing all {len(runs)} {arch_name} runs")
+    print(f"{'='*60}")
+    sys.stdout.flush()
+
     return all_results
 
 # Process both architectures
-if PRINT_TEXT:
-    print("\n" + "="*60)
-    print("Processing JumpReLU runs...")
-    print("="*60)
-    sys.stdout.flush()
 jumprelu_results = process_runs(jumprelu_runs, "JumpReLU")
-
-if PRINT_TEXT:
-    print("\n" + "="*60)
-    print("Processing BatchTopK runs...")
-    print("="*60)
-    sys.stdout.flush()
 batchtopk_results = process_runs(batchtopk_runs, "BatchTopK")
 
 # %%
@@ -349,6 +383,8 @@ def summarize_results(results, arch_name):
             "joint_l2": r["joint_l2"],
             "solo_l2": r["solo_l2"],
             "joint_decomp": r["joint_decomp"],
+            "joint_l0": r["joint_l0"],
+            "solo_l0": r["solo_l0"],
         }
 
         # Add summary stats for each matching method
@@ -387,21 +423,24 @@ def summarize_results(results, arch_name):
     df = pd.DataFrame(rows)
     return df
 
+print("\n" + "="*60)
+print("GENERATING SUMMARY STATISTICS")
+print("="*60)
+sys.stdout.flush()
+
 jumprelu_df = summarize_results(jumprelu_results, "JumpReLU")
 batchtopk_df = summarize_results(batchtopk_results, "BatchTopK")
 
 if PRINT_TEXT:
-    print("\n" + "="*60)
-    print("JumpReLU Summary")
-    print("="*60)
+    print("\nJumpReLU Summary:")
+    print("-" * 40)
     cols = ["lambda2", "sigma_sq", "solo_cosine_mean", "solo_l2_mean", "solo_frac_above_0.9", "solo_frac_above_0.99"]
     if "hung_cosine_mean" in jumprelu_df.columns:
         cols = ["lambda2", "sigma_sq", "hung_cosine_mean", "hung_l2_mean", "hung_frac_above_0.9", "hung_frac_above_0.99"]
     print(jumprelu_df[cols].to_string())
 
-    print("\n" + "="*60)
-    print("BatchTopK Summary")
-    print("="*60)
+    print("\nBatchTopK Summary:")
+    print("-" * 40)
     print(batchtopk_df[cols].to_string())
     sys.stdout.flush()
 
@@ -410,11 +449,20 @@ if PRINT_TEXT:
 # PLOTTING: METRICS VS LAMBDA2
 # =============================================================================
 
+print("\n" + "="*60)
+print("GENERATING PLOTS")
+print("="*60)
+sys.stdout.flush()
+
 def plot_metrics_vs_lambda2(df, results, arch_name):
     """Plot key metrics vs lambda2 for a given architecture."""
+    # Get L0 range for title
+    l0_min = df["solo_l0"].min()
+    l0_max = df["solo_l0"].max()
+    l0_info = f" (L0: {l0_min:.0f}-{l0_max:.0f})" if l0_min != l0_max else f" (L0≈{l0_min:.0f})"
 
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    fig.suptitle(f"{arch_name}: Decoder Similarity vs Lambda2", fontsize=14)
+    fig.suptitle(f"{arch_name}: Decoder Similarity vs Lambda2{l0_info}", fontsize=14)
 
     # Determine which methods are available
     methods = [("solo", "Solo→Joint"), ("join", "Joint→Solo")]
@@ -494,10 +542,11 @@ def plot_metrics_vs_lambda2(df, results, arch_name):
     plt.savefig(OUTPUT_DIR / f"{arch_name.lower()}_metrics_vs_lambda2.png", dpi=150)
     plt.close()
 
-    if PRINT_TEXT:
-        print(f"Saved {arch_name.lower()}_metrics_vs_lambda2.png")
-        sys.stdout.flush()
+    print(f"  Saved {arch_name.lower()}_metrics_vs_lambda2.png")
+    sys.stdout.flush()
 
+print("\nGenerating metrics vs lambda2 plots...")
+sys.stdout.flush()
 plot_metrics_vs_lambda2(jumprelu_df, jumprelu_results, "JumpReLU")
 plot_metrics_vs_lambda2(batchtopk_df, batchtopk_results, "BatchTopK")
 
@@ -517,6 +566,11 @@ def plot_distributions_by_lambda2(results, arch_name):
     lambda2_values = sorted(by_lambda2.keys())
     n_lambda2 = len(lambda2_values)
 
+    # Get L0 range for title
+    all_l0 = [r["solo_l0"] for r in results]
+    l0_min, l0_max = min(all_l0), max(all_l0)
+    l0_info = f" (L0: {l0_min:.0f}-{l0_max:.0f})" if l0_min != l0_max else f" (L0≈{l0_min:.0f})"
+
     # Determine which methods are available
     sample_result = results[0]
     methods = [("solo_to_joint", "Solo→Joint"), ("joint_to_solo", "Joint→Solo")]
@@ -528,7 +582,7 @@ def plot_distributions_by_lambda2(results, arch_name):
     fig, axes = plt.subplots(n_lambda2, n_methods, figsize=(5*n_methods, 4*n_lambda2))
     if n_lambda2 == 1:
         axes = axes.reshape(1, -1)
-    fig.suptitle(f"{arch_name}: Cosine Similarity Distributions by Lambda2", fontsize=14)
+    fig.suptitle(f"{arch_name}: Cosine Similarity Distributions by Lambda2{l0_info}", fontsize=14)
 
     for i, l2 in enumerate(lambda2_values):
         runs = by_lambda2[l2]
@@ -603,10 +657,11 @@ def plot_distributions_by_lambda2(results, arch_name):
     plt.savefig(OUTPUT_DIR / f"{arch_name.lower()}_norm_ratio_distributions.png", dpi=150)
     plt.close()
 
-    if PRINT_TEXT:
-        print(f"Saved {arch_name.lower()}_*_distributions.png")
-        sys.stdout.flush()
+    print(f"  Saved {arch_name.lower()}_*_distributions.png (3 files)")
+    sys.stdout.flush()
 
+print("\nGenerating distribution histograms...")
+sys.stdout.flush()
 plot_distributions_by_lambda2(jumprelu_results, "JumpReLU")
 plot_distributions_by_lambda2(batchtopk_results, "BatchTopK")
 
@@ -615,22 +670,23 @@ plot_distributions_by_lambda2(batchtopk_results, "BatchTopK")
 # SAVE RESULTS
 # =============================================================================
 
+print("\nSaving summary CSVs...")
+sys.stdout.flush()
 jumprelu_df.to_csv(OUTPUT_DIR / "jumprelu_summary.csv", index=False)
 batchtopk_df.to_csv(OUTPUT_DIR / "batchtopk_summary.csv", index=False)
-
-if PRINT_TEXT:
-    print(f"\nSaved summary CSVs to {OUTPUT_DIR}")
-    print("\nDone!")
+print(f"  Saved jumprelu_summary.csv, batchtopk_summary.csv")
 
 # %%
 # =============================================================================
 # KEY FINDINGS PRINTOUT
 # =============================================================================
 
+print("\n" + "="*60)
+print("KEY FINDINGS")
+print("="*60)
+sys.stdout.flush()
+
 if PRINT_TEXT:
-    print("\n" + "="*60)
-    print("KEY FINDINGS")
-    print("="*60)
 
     for arch_name, df in [("JumpReLU", jumprelu_df), ("BatchTopK", batchtopk_df)]:
         print(f"\n{arch_name}:")
@@ -655,3 +711,327 @@ if PRINT_TEXT:
         print(f"  Joint L2 error: λ2=0 → {low_l2_recon:.6f}, λ2=max → {high_l2_recon:.6f}")
 
     sys.stdout.flush()
+
+# %%
+# =============================================================================
+# L0 EVOLUTION PLOTS FOR JUMPRELU (DUAL Y-AXIS)
+# =============================================================================
+# Plot L0 and l0_coeff over training for JumpReLU runs
+
+print("\nGenerating L0 evolution plots for JumpReLU...")
+sys.stdout.flush()
+
+def plot_l0_evolution(run, phase="solo_primary"):
+    """Load training metrics and plot L0 and l0_coeff evolution."""
+    run_dir = Path(run["run_dir"])
+    metrics_file = run_dir / f"training_{phase}_metrics.json"
+
+    if not metrics_file.exists():
+        return None
+
+    with open(metrics_file) as f:
+        data = json.load(f)
+
+    metrics = data.get("metrics", [])
+    if not metrics:
+        return None
+
+    steps = [m["step"] for m in metrics]
+    l0_values = [m["l0_norm"] for m in metrics]
+    l0_coeff_values = [m.get("l0_coeff") for m in metrics]
+
+    # Check if we have l0_coeff data (JumpReLU only)
+    has_l0_coeff = any(v is not None for v in l0_coeff_values)
+
+    return {
+        "steps": steps,
+        "l0": l0_values,
+        "l0_coeff": l0_coeff_values if has_l0_coeff else None,
+        "lambda2": run["config"]["lambda2"],
+        "sigma_sq": run["config"]["sigma_sq"],
+    }
+
+def plot_jumprelu_l0_evolution(runs, title_suffix=""):
+    """Plot L0 evolution for all JumpReLU runs with dual y-axis."""
+    # Group by lambda2
+    by_lambda2 = defaultdict(list)
+    for run in runs:
+        data = plot_l0_evolution(run, "solo_primary")
+        if data and data["l0_coeff"] is not None:
+            by_lambda2[run["config"]["lambda2"]].append(data)
+
+    if not by_lambda2:
+        print("No JumpReLU L0 evolution data found")
+        return
+
+    lambda2_values = sorted(by_lambda2.keys())
+    n_lambda2 = len(lambda2_values)
+
+    fig, axes = plt.subplots(n_lambda2, 2, figsize=(14, 4*n_lambda2))
+    if n_lambda2 == 1:
+        axes = axes.reshape(1, -1)
+
+    fig.suptitle(f"JumpReLU L0 & Sparsity Coefficient Evolution{title_suffix}", fontsize=14)
+
+    for i, l2 in enumerate(lambda2_values):
+        runs_data = by_lambda2[l2]
+
+        # Left plot: L0 over training
+        ax = axes[i, 0]
+        for data in runs_data:
+            ax.plot(data["steps"], data["l0"], alpha=0.7,
+                   label=f"σ²={data['sigma_sq']}")
+        ax.axhline(y=64, color='r', linestyle='--', alpha=0.5, label='Target L0=64')
+        ax.set_xlabel("Training Step")
+        ax.set_ylabel("L0 (Active Features)")
+        ax.set_title(f"λ2={l2}: L0 over Training")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Right plot: Dual y-axis with L0 and l0_coeff
+        ax1 = axes[i, 1]
+        ax2 = ax1.twinx()
+
+        colors = plt.cm.tab10(np.linspace(0, 1, len(runs_data)))
+
+        for j, data in enumerate(runs_data):
+            color = colors[j]
+            # L0 on left axis
+            line1, = ax1.plot(data["steps"], data["l0"], color=color,
+                             linestyle='-', alpha=0.7, label=f"L0 (σ²={data['sigma_sq']})")
+            # l0_coeff on right axis
+            l0_coeff = [v if v is not None else np.nan for v in data["l0_coeff"]]
+            line2, = ax2.plot(data["steps"], l0_coeff, color=color,
+                             linestyle='--', alpha=0.7, label=f"coeff (σ²={data['sigma_sq']})")
+
+        ax1.axhline(y=64, color='r', linestyle=':', alpha=0.5)
+        ax1.set_xlabel("Training Step")
+        ax1.set_ylabel("L0 (Active Features)", color='black')
+        ax2.set_ylabel("L0 Coefficient", color='gray')
+        ax1.set_title(f"λ2={l2}: L0 & Coefficient (Dual Axis)")
+        ax1.grid(True, alpha=0.3)
+
+        # Combined legend
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "jumprelu_l0_evolution.png", dpi=150)
+    plt.close()
+
+    print("  Saved jumprelu_l0_evolution.png")
+    sys.stdout.flush()
+
+# Also plot joint training L0 evolution
+def plot_jumprelu_joint_l0_evolution(runs):
+    """Plot L0 evolution during joint training for JumpReLU runs."""
+    by_lambda2 = defaultdict(list)
+    for run in runs:
+        data = plot_l0_evolution(run, "joint_primary")
+        if data and data["l0_coeff"] is not None:
+            by_lambda2[run["config"]["lambda2"]].append(data)
+
+    if not by_lambda2:
+        print("No JumpReLU joint training L0 evolution data found")
+        return
+
+    lambda2_values = sorted(by_lambda2.keys())
+    n_lambda2 = len(lambda2_values)
+
+    fig, axes = plt.subplots(n_lambda2, 2, figsize=(14, 4*n_lambda2))
+    if n_lambda2 == 1:
+        axes = axes.reshape(1, -1)
+
+    fig.suptitle("JumpReLU Joint Training: L0 & Sparsity Coefficient Evolution", fontsize=14)
+
+    for i, l2 in enumerate(lambda2_values):
+        runs_data = by_lambda2[l2]
+
+        ax = axes[i, 0]
+        for data in runs_data:
+            ax.plot(data["steps"], data["l0"], alpha=0.7,
+                   label=f"σ²={data['sigma_sq']}")
+        ax.axhline(y=64, color='r', linestyle='--', alpha=0.5, label='Target L0=64')
+        ax.set_xlabel("Training Step")
+        ax.set_ylabel("L0 (Active Features)")
+        ax.set_title(f"Joint Training λ2={l2}: L0 over Training")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        ax1 = axes[i, 1]
+        ax2 = ax1.twinx()
+
+        colors = plt.cm.tab10(np.linspace(0, 1, len(runs_data)))
+
+        for j, data in enumerate(runs_data):
+            color = colors[j]
+            ax1.plot(data["steps"], data["l0"], color=color,
+                    linestyle='-', alpha=0.7, label=f"L0 (σ²={data['sigma_sq']})")
+            l0_coeff = [v if v is not None else np.nan for v in data["l0_coeff"]]
+            ax2.plot(data["steps"], l0_coeff, color=color,
+                    linestyle='--', alpha=0.7, label=f"coeff (σ²={data['sigma_sq']})")
+
+        ax1.axhline(y=64, color='r', linestyle=':', alpha=0.5)
+        ax1.set_xlabel("Training Step")
+        ax1.set_ylabel("L0 (Active Features)", color='black')
+        ax2.set_ylabel("L0 Coefficient", color='gray')
+        ax1.set_title(f"Joint Training λ2={l2}: L0 & Coefficient (Dual Axis)")
+        ax1.grid(True, alpha=0.3)
+
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "jumprelu_joint_l0_evolution.png", dpi=150)
+    plt.close()
+
+    print("  Saved jumprelu_joint_l0_evolution.png")
+    sys.stdout.flush()
+
+# Plot for JumpReLU runs (using the all_runs data with full config)
+jumprelu_runs_full = [r for r in all_runs
+                      if r["config"]["primary_sae_type"] == "jumprelu"]
+
+plot_jumprelu_l0_evolution(jumprelu_runs_full, " (Solo Primary Training)")
+plot_jumprelu_joint_l0_evolution(jumprelu_runs_full)
+
+# %%
+# =============================================================================
+# BATCHTOPK vs JUMPRELU COMPARISON
+# =============================================================================
+
+print("\nGenerating BatchTopK vs JumpReLU comparison plots...")
+sys.stdout.flush()
+
+# Combine both DataFrames with architecture label
+if len(jumprelu_df) > 0 and len(batchtopk_df) > 0:
+    jumprelu_df["architecture"] = "JumpReLU"
+    batchtopk_df["architecture"] = "BatchTopK"
+    combined_df = pd.concat([jumprelu_df, batchtopk_df], ignore_index=True)
+
+    # Plot comparison
+    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+    fig.suptitle("BatchTopK vs JumpReLU: Decoder Similarity Comparison", fontsize=14)
+
+    # Determine metric prefix
+    metric_prefix = "hung" if "hung_cosine_mean" in combined_df.columns else "solo"
+
+    # 1. Mean cosine similarity by architecture and lambda2
+    ax = axes[0, 0]
+    for arch in ["BatchTopK", "JumpReLU"]:
+        subset = combined_df[combined_df["architecture"] == arch]
+        means = subset.groupby("lambda2")[f"{metric_prefix}_cosine_mean"].mean()
+        stds = subset.groupby("lambda2")[f"{metric_prefix}_cosine_mean"].std()
+        ax.errorbar(means.index, means.values, yerr=stds.values, marker='o',
+                   label=arch, capsize=3)
+    ax.set_xlabel("Lambda2")
+    ax.set_ylabel("Mean Cosine Similarity")
+    ax.set_title("Cosine Similarity: Joint vs Solo Decoders")
+    ax.legend()
+    ax.set_xscale('symlog', linthresh=0.001)
+    ax.grid(True, alpha=0.3)
+
+    # 2. Fraction above 0.99 by architecture
+    ax = axes[0, 1]
+    for arch in ["BatchTopK", "JumpReLU"]:
+        subset = combined_df[combined_df["architecture"] == arch]
+        means = subset.groupby("lambda2")[f"{metric_prefix}_frac_above_0.99"].mean()
+        stds = subset.groupby("lambda2")[f"{metric_prefix}_frac_above_0.99"].std()
+        ax.errorbar(means.index, means.values, yerr=stds.values, marker='o',
+                   label=arch, capsize=3)
+    ax.set_xlabel("Lambda2")
+    ax.set_ylabel("Fraction > 0.99 Cosine")
+    ax.set_title("High-Quality Matches (>0.99 cosine)")
+    ax.legend()
+    ax.set_xscale('symlog', linthresh=0.001)
+    ax.grid(True, alpha=0.3)
+
+    # 3. Mean L2 distance
+    ax = axes[0, 2]
+    for arch in ["BatchTopK", "JumpReLU"]:
+        subset = combined_df[combined_df["architecture"] == arch]
+        means = subset.groupby("lambda2")[f"{metric_prefix}_l2_mean"].mean()
+        stds = subset.groupby("lambda2")[f"{metric_prefix}_l2_mean"].std()
+        ax.errorbar(means.index, means.values, yerr=stds.values, marker='o',
+                   label=arch, capsize=3)
+    ax.set_xlabel("Lambda2")
+    ax.set_ylabel("Mean L2 Distance")
+    ax.set_title("L2 Distance: Joint vs Solo Decoders")
+    ax.legend()
+    ax.set_xscale('symlog', linthresh=0.001)
+    ax.grid(True, alpha=0.3)
+
+    # 4. Joint L2 reconstruction quality
+    ax = axes[1, 0]
+    for arch in ["BatchTopK", "JumpReLU"]:
+        subset = combined_df[combined_df["architecture"] == arch]
+        means = subset.groupby("lambda2")["joint_l2"].mean()
+        stds = subset.groupby("lambda2")["joint_l2"].std()
+        ax.errorbar(means.index, means.values, yerr=stds.values, marker='o',
+                   label=arch, capsize=3)
+    ax.set_xlabel("Lambda2")
+    ax.set_ylabel("Joint L2 Error")
+    ax.set_title("Reconstruction Quality (Lower = Better)")
+    ax.legend()
+    ax.set_xscale('symlog', linthresh=0.001)
+    ax.grid(True, alpha=0.3)
+
+    # 5. Joint decomp penalty
+    ax = axes[1, 1]
+    for arch in ["BatchTopK", "JumpReLU"]:
+        subset = combined_df[combined_df["architecture"] == arch]
+        means = subset.groupby("lambda2")["joint_decomp"].mean()
+        stds = subset.groupby("lambda2")["joint_decomp"].std()
+        ax.errorbar(means.index, means.values, yerr=stds.values, marker='o',
+                   label=arch, capsize=3)
+    ax.set_xlabel("Lambda2")
+    ax.set_ylabel("Joint Decomp Penalty")
+    ax.set_title("Composability Penalty (Lower = Less Composable)")
+    ax.legend()
+    ax.set_xscale('symlog', linthresh=0.001)
+    ax.grid(True, alpha=0.3)
+
+    # 6. Scatter: Cosine sim vs Lambda2, colored by architecture
+    ax = axes[1, 2]
+    for arch, marker in [("BatchTopK", 'o'), ("JumpReLU", 's')]:
+        subset = combined_df[combined_df["architecture"] == arch]
+        ax.scatter(subset["lambda2"], subset[f"{metric_prefix}_cosine_mean"],
+                  marker=marker, alpha=0.7, label=arch, s=60)
+    ax.set_xlabel("Lambda2")
+    ax.set_ylabel("Mean Cosine Similarity")
+    ax.set_title("All Runs: Cosine Similarity")
+    ax.legend()
+    ax.set_xscale('symlog', linthresh=0.001)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "batchtopk_vs_jumprelu_comparison.png", dpi=150)
+    plt.close()
+
+    print("  Saved batchtopk_vs_jumprelu_comparison.png")
+
+    if PRINT_TEXT:
+        # Print summary comparison
+        print("\nSummary: BatchTopK vs JumpReLU")
+        print("-" * 50)
+        for arch in ["BatchTopK", "JumpReLU"]:
+            subset = combined_df[combined_df["architecture"] == arch]
+            print(f"\n{arch}:")
+            print(f"  Mean cosine similarity: {subset[f'{metric_prefix}_cosine_mean'].mean():.4f}")
+            print(f"  Frac > 0.99 cosine: {subset[f'{metric_prefix}_frac_above_0.99'].mean():.4f}")
+            print(f"  Mean L2 distance: {subset[f'{metric_prefix}_l2_mean'].mean():.4f}")
+            print(f"  Mean joint L2: {subset['joint_l2'].mean():.6f}")
+
+        sys.stdout.flush()
+
+    # Save combined results
+    combined_df.to_csv(OUTPUT_DIR / "combined_comparison.csv", index=False)
+    print(f"  Saved combined_comparison.csv")
+
+print("\n" + "="*60)
+print("DECODER COMPARISON COMPLETE")
+print(f"All outputs saved to: {OUTPUT_DIR}")
+print("="*60)
+sys.stdout.flush()

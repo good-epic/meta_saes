@@ -33,7 +33,7 @@ PRINT_TEXT = False  # Set to True to print detailed text readouts
 # 1. LOAD DATA
 # =============================================================================
 
-grid_dir = Path("../outputs/grid_search_20260116_212533")
+grid_dir = Path("../outputs/grid_search_20260128_223720")
 
 # Find all metrics.json files
 metrics_files = list(grid_dir.glob("*/metrics.json"))
